@@ -1,8 +1,8 @@
 # AllHailSeizure account-wide GitHub label scheme.
 # Source of truth for tools/sync_labels.py.
 #
-# Shared labels (8 type + 3 priority) apply to every owned repo listed
-# under repos. Per-repo extras are applied only on that repo.
+# Shared labels (8 type + 3 priority + automerge) apply to every owned
+# repo listed under repos. Per-repo extras are applied only on that repo.
 # GitHub label names are case-sensitive; use these spellings exactly.
 #
 # Status labels are intentionally omitted. Close duplicates and
@@ -50,6 +50,11 @@ shared:
   - name: P3
     color: "FFFF00"
     description: Low priority.
+
+  # Opt-in squash-merge label used by the reusable automerge workflow.
+  - name: automerge
+    color: "87BF5E"
+    description: Squash-merge this PR when required CI checks are green.
 
 # Old name -> new name. The sync renames in place so existing issues
 # and PRs keep the label. If the new name already exists, the old name
@@ -105,9 +110,6 @@ repos:
       - name: governance
         color: "5319E7"
         description: Touches repo-operating rules (workflows, gates, hooks, process docs).
-      - name: automerge
-        color: "87BF5E"
-        description: Squash-merge this PR when required CI checks are green.
 
   hotel-kline-book: {}
   register-study:

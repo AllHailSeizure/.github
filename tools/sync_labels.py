@@ -188,7 +188,15 @@ def plan_repo(scheme: dict[str, Any], repo: str) -> Plan:
     owner = scheme["owner"]
     cfg = scheme["repos"][repo]
     desired = desired_for(scheme, repo)
-    shared_names = {item["name"] for item in scheme["shared"]}
+    # Only type and priority colours are left alone on hotel-kline-game.
+    type_and_priority_names = {
+        item["name"]
+        for item in scheme["shared"]
+        if item["name"] in {
+            "bug", "feat", "docs", "refactor", "tooling", "test", "assets",
+            "question", "P1", "P2", "P3",
+        }
+    }
     must_keep = set(cfg.get("must_keep") or [])
     keep_colours = bool(cfg.get("keep_existing_type_and_priority_colours"))
     existing = list_labels(owner, repo)
@@ -211,7 +219,7 @@ def plan_repo(scheme: dict[str, Any], repo: str) -> Plan:
         entry = dict(remaining.pop(old))
         entry["name"] = new
         wanted = desired[new]
-        if not (keep_colours and new in shared_names):
+        if not (keep_colours and new in type_and_priority_names):
             entry["color"] = wanted["color"]
         entry["description"] = wanted["description"]
         remaining[new] = entry
@@ -223,7 +231,7 @@ def plan_repo(scheme: dict[str, Any], repo: str) -> Plan:
         actual = remaining[name]
         color_change = colours_differ(actual.get("color"), wanted["color"])
         desc_change = descriptions_differ(actual.get("description"), wanted["description"])
-        skip_color = keep_colours and name in shared_names and color_change
+        skip_color = keep_colours and name in type_and_priority_names and color_change
         if skip_color:
             plan.skipped.append(
                 f"keep existing colour on {name} ({actual.get('color')}, not {wanted['color']})"
