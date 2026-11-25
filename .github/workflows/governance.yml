@@ -1,0 +1,44 @@
+# Reusable governance-separation check. Fails a pull request whose changed
+# files include both governance and non-governance paths. The default path
+# list is governance.json in this repository; a calling repo may extend it
+# with .github/governance.json, which is read from the PR base ref only.
+name: Governance separation
+
+"on":
+  workflow_call:
+    inputs:
+      pull_number:
+        description: Pull request number to check
+        type: number
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  governance:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      # Checkout this defaults repo at the SHA the caller pinned, not the
+      # pull request under review. The script must not run untrusted code.
+      - name: Checkout AllHailSeizure/.github
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: AllHailSeizure/.github
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Fail if this PR mixes governance and other changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GOVERNANCE_PULL_NUMBER: ${{ inputs.pull_number }}
+        run: python tools/check_governance_separation.py

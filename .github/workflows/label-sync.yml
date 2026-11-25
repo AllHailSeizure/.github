@@ -1,0 +1,57 @@
+name: Sync labels
+
+# Manual only. Do not add push or pull_request triggers until a dry-run
+# has been reviewed and LABEL_SYNC_TOKEN is in place.
+"on":
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Plan changes without applying them
+        type: boolean
+        default: true
+      allow_deletes:
+        description: Also delete labels listed in labels.yml (never deletes hotel-kline-game must-keep labels)
+        type: boolean
+        default: false
+      repos:
+        description: Optional comma-separated repo names (default is every owned repo in labels.yml)
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install PyYAML
+        run: pip install pyyaml
+
+      - name: Require LABEL_SYNC_TOKEN
+        env:
+          LABEL_SYNC_TOKEN: ${{ secrets.LABEL_SYNC_TOKEN }}
+        run: |
+          if [ -z "$LABEL_SYNC_TOKEN" ]; then
+            echo "LABEL_SYNC_TOKEN is not set. Create a fine-grained PAT owned by AllHailSeizure,"
+            echo "limited to the twelve owned repos in labels.yml, with Issues: Read and write,"
+            echo "and store it as the LABEL_SYNC_TOKEN repository secret. GITHUB_TOKEN cannot"
+            echo "write labels on other repositories."
+            exit 1
+          fi
+
+      - name: Sync labels
+        env:
+          GH_TOKEN: ${{ secrets.LABEL_SYNC_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          ALLOW_DELETES: ${{ inputs.allow_deletes }}
+          REPOS: ${{ inputs.repos }}
+        run: python3 tools/sync_labels.py

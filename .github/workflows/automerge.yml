@@ -1,0 +1,73 @@
+# Reusable automerge gate. Call it only from a repo that has CI and required
+# status checks (a ruleset or classic branch protection) on the base branch.
+# Repos without required checks must not opt in: this workflow will not merge
+# if it cannot see at least one required check. It never bypasses protection.
+name: Automerge
+
+"on":
+  workflow_call:
+    inputs:
+      event_name:
+        description: Caller event name (pull_request_target or workflow_run)
+        type: string
+        required: true
+      pull_number:
+        description: Pull request number when the caller event has one (0 to look up by head_sha)
+        type: number
+        required: false
+        default: 0
+      head_sha:
+        description: Commit SHA used to find PRs when pull_number is 0 (workflow_run.head_sha)
+        type: string
+        required: false
+        default: ""
+      required_checks:
+        description: Comma-separated required check names, matching the repo's ruleset or branch protection. If GitHub reports none and this is empty, the gate will not merge.
+        type: string
+        required: false
+        default: ""
+      labels:
+        description: Comma-separated labels that must all be present
+        type: string
+        required: false
+        default: automerge
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+  checks: read
+
+jobs:
+  automerge:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: read
+      checks: read
+    steps:
+      # Checkout this defaults repo at the SHA the caller pinned, not the
+      # pull request under review. The job token can merge, so it must not
+      # run untrusted code.
+      - name: Checkout AllHailSeizure/.github
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: AllHailSeizure/.github
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Squash-merge when the automerge label and required checks are green
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AUTOMERGE_LABELS: ${{ inputs.labels }}
+          AUTOMERGE_REQUIRED_CHECKS: ${{ inputs.required_checks }}
+          AUTOMERGE_PULL_NUMBER: ${{ inputs.pull_number }}
+          AUTOMERGE_HEAD_SHA: ${{ inputs.head_sha }}
+          AUTOMERGE_EVENT_NAME: ${{ inputs.event_name }}
+        run: python tools/automerge_gate.py

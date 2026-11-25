@@ -1,0 +1,22 @@
+{
+  "_comment": "Governance paths set how the repo operates. Anything else is non-governance. A PR that touches governance may touch only governance. A calling repo may extend this list with .github/governance.json on its base branch; that add-on is never read from the PR head.",
+  "governance": {
+    "files": [
+      "AGENTS.md",
+      "CONTRIBUTING.md",
+      "CLAUDE.md",
+      "SECURITY.md",
+      "CODEOWNERS",
+      ".cursor/settings.json"
+    ],
+    "prefixes": [
+      ".github/",
+      ".githooks/",
+      ".cursor/rules/",
+      ".cursor/skills/",
+      ".codex/",
+      ".synapse/"
+    ],
+    "globs": []
+  }
+}
