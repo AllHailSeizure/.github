@@ -12,7 +12,7 @@ A file in an individual repo always takes precedence over the one here.
 
 ## Labels
 
-[`labels.yml`](labels.yml) defines the account-wide label scheme: eight type labels, three priorities (`P1`, `P2`, `P3`) and `automerge`, plus a few repo-specific extras. Labels don't inherit on GitHub, so the [label-sync workflow](.github/workflows/label-sync.yml) pushes the scheme to each repo. It runs manually and defaults to a dry run.
+[`labels.yml`](labels.yml) defines the account-wide label scheme: eight type labels, three priorities (`P1`, `P2`, `P3`) and `automerge`, plus a few repo-specific extras. Labels don't inherit on GitHub, so the [label-sync workflow](.github/workflows/label-sync.yml) discovers owned repos and pushes the scheme to each. A nightly run applies updates without deletes; manual runs default to a dry run.
 
 ## Reusable workflows
 

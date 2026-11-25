@@ -1,15 +1,18 @@
 # AllHailSeizure account-wide GitHub label scheme.
 # Source of truth for tools/sync_labels.py.
 #
-# Shared labels (8 type + 3 priority + automerge) apply to every owned
-# repo listed under repos. Per-repo extras are applied only on that repo.
-# GitHub label names are case-sensitive; use these spellings exactly.
+# Shared labels (8 type + 3 priority + automerge) apply to every owned,
+# non-fork, non-archived repo the sync discovers (the `.github` repo
+# itself is skipped). Per-repo extras and overrides under repos are
+# applied only on that repo; a key for a repo that is not discovered
+# is a warning, not a failure. GitHub label names are case-sensitive;
+# use these spellings exactly.
 #
 # Status labels are intentionally omitted. Close duplicates and
 # won't-fix issues with GitHub's close reasons, and note blockers
 # as "blocked by #N".
 #
-# Forks (Nestor, willow-2.0) are not listed and are not synced.
+# Forks (Nestor, willow-2.0) are excluded by discovery and are not synced.
 
 owner: AllHailSeizure
 
@@ -84,6 +87,8 @@ delete_when_enabled:
   # Also: documentation / enhancement on a repo that already has docs / feat
   # (currently synapse; unused there). Those are implied by a blocked rename.
 
+# Per-repo extras and overrides only. Shared labels cover every discovered
+# repo; do not list repos here just to include them in the sync.
 repos:
   hotel-kline-game:
     # Type and priority already exist under these exact names. CI matches
@@ -111,22 +116,9 @@ repos:
         color: "5319E7"
         description: Touches repo-operating rules (workflows, gates, hooks, process docs).
 
-  hotel-kline-book: {}
   register-study:
     extras:
       - name: area:formality
         color: "1D76DB"
         description: Formality effects on LLM sycophancy.
         # Renamed from formality; open issues already carry that label.
-  Reddit-Devvit: {}
-  # Already has feat, docs, refactor and priority:high/medium/low.
-  # Its PR template still lists Type "fix" and Priority p0–p3; update
-  # that template in synapse itself (not here) when labels are applied.
-  synapse: {}
-  star-system: {}
-  srclib: {}
-  cortex: {}
-  weedeat: {}
-  Imageination: {}
-  pixelorama-plugins: {}
-  PCBs: {}
