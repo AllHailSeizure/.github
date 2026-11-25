@@ -8,6 +8,10 @@ These are personal repositories, maintained by one person plus a few automation 
 - One pull request per change, targeted at `master`.
 - Fill in the pull request template. Link an issue with `Closes #N` when there is one.
 
+## Branch names
+
+Each bot works only on branches prefixed with its own name, with a trailing slash: `ordo-repositos/`, `strategy-bot/`, `euphrate-keeler/`, and so on. Humans use any other descriptive branch name, and do not use a bot's prefix.
+
 ## Labels
 
 Each issue or PR should have one type label and one priority label.
