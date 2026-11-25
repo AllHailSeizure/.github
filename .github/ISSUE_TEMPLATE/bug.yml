@@ -1,0 +1,27 @@
+name: Bug report
+description: Something is broken or behaves wrongly.
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What went wrong, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: Steps, a command, or a short test case. Include versions if they matter.
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      description: P1 is high, P2 medium, P3 low. Add the matching label after opening if you want it tracked that way.
+      options:
+        - P1
+        - P2
+        - P3

@@ -1,0 +1,130 @@
+# AllHailSeizure account-wide GitHub label scheme.
+# Source of truth for tools/sync_labels.py.
+#
+# Shared labels (8 type + 3 priority) apply to every owned repo listed
+# under repos. Per-repo extras are applied only on that repo.
+# GitHub label names are case-sensitive; use these spellings exactly.
+#
+# Status labels are intentionally omitted. Close duplicates and
+# won't-fix issues with GitHub's close reasons, and note blockers
+# as "blocked by #N".
+#
+# Forks (Nestor, willow-2.0) are not listed and are not synced.
+
+owner: AllHailSeizure
+
+shared:
+  # Type (colour A2EEEF). Names match hotel-kline-game CI.
+  - name: bug
+    color: "A2EEEF"
+    description: Something isn't working.
+  - name: feat
+    color: "A2EEEF"
+    description: New functionality.
+  - name: docs
+    color: "A2EEEF"
+    description: Documentation-only changes.
+  - name: refactor
+    color: "A2EEEF"
+    description: Code restructure, no behaviour change.
+  - name: tooling
+    color: "A2EEEF"
+    description: Development tools, CI, or repo scripts.
+  - name: test
+    color: "A2EEEF"
+    description: Testing-only changes.
+  - name: assets
+    color: "A2EEEF"
+    description: Visual, audio, or data resources.
+  - name: question
+    color: "A2EEEF"
+    description: Further information is requested.
+
+  # Priority. hotel-kline-game already uses these exact names and colours.
+  - name: P1
+    color: "FF0000"
+    description: High priority.
+  - name: P2
+    color: "D93F0B"
+    description: Medium priority.
+  - name: P3
+    color: "FFFF00"
+    description: Low priority.
+
+# Old name -> new name. The sync renames in place so existing issues
+# and PRs keep the label. If the new name already exists, the old name
+# is left alone and treated as a delete candidate (see
+# delete_when_enabled). Dropped status names (duplicate, invalid,
+# wontfix) are not renamed; they are delete candidates.
+renames:
+  documentation: docs
+  enhancement: feat
+  formality: area:formality
+  "priority:high": P1
+  "priority:medium": P2
+  "priority:low": P3
+
+# Deleted only when the workflow is run with allow_deletes enabled.
+# hotel-kline-game must-keep labels are never deleted, even if listed.
+delete_when_enabled:
+  - "good first issue"
+  - "help wanted"
+  - accessibility
+  - module-wip
+  - dependencies
+  - github_actions
+  - duplicate
+  - invalid
+  - wontfix
+  # Also: documentation / enhancement on a repo that already has docs / feat
+  # (currently synapse; unused there). Those are implied by a blocked rename.
+
+repos:
+  hotel-kline-game:
+    # Type and priority already exist under these exact names. CI matches
+    # on name only. Keep the existing per-type colours (bug red, test
+    # green, and so on) for scannability.
+    keep_existing_type_and_priority_colours: true
+    # Hard-coded in Tools/lint/pr_label_schema.py, apply_pr_labels.py,
+    # check_pr_labels.py, automerge.yml, AGENTS.md, and CONTRIBUTING.md.
+    # "Tested in Godot" and @fastpatch are not labels; do not create them.
+    must_keep:
+      - bug
+      - feat
+      - docs
+      - refactor
+      - tooling
+      - test
+      - assets
+      - P1
+      - P2
+      - P3
+      - governance
+      - automerge
+    extras:
+      - name: governance
+        color: "5319E7"
+        description: Touches repo-operating rules (workflows, gates, hooks, process docs).
+      - name: automerge
+        color: "87BF5E"
+        description: Squash-merge this PR when required CI checks are green.
+
+  hotel-kline-book: {}
+  register-study:
+    extras:
+      - name: area:formality
+        color: "1D76DB"
+        description: Formality effects on LLM sycophancy.
+        # Renamed from formality; open issues already carry that label.
+  Reddit-Devvit: {}
+  # Already has feat, docs, refactor and priority:high/medium/low.
+  # Its PR template still lists Type "fix" and Priority p0–p3; update
+  # that template in synapse itself (not here) when labels are applied.
+  synapse: {}
+  science_bitch: {}
+  srclib: {}
+  cortex: {}
+  weedeat: {}
+  Imageination: {}
+  pixelorama-plugins: {}
+  PCBs: {}
