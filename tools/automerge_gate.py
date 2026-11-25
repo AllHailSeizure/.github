@@ -3,7 +3,9 @@
 
 Never bypasses branch protection or rulesets. An empty required-check list
 never merges: a repo without required checks (no ruleset or classic branch
-protection) must not opt in.
+protection) must not opt in. A PR that mixes governance and non-governance
+paths is skipped, using the same classifier and base-branch add-on as the
+governance-separation check.
 
 The script is self-contained. It does not import hotel-kline-game Tools/.
 """
@@ -17,6 +19,8 @@ import sys
 import urllib.parse
 from pathlib import Path
 from typing import Any
+
+from governance import AddonError, load_effective_config, list_pr_paths, mixes_governance
 
 # Every listed label must be on the pull request. Override with AUTOMERGE_LABELS
 # (comma-separated). An empty list never merges.
@@ -161,6 +165,8 @@ def skip_reason(
     mergeable: str,
     required: frozenset[str],
     required_checks: tuple[str, ...],
+    paths: list[str] | None = None,
+    config: dict | None = None,
 ) -> str | None:
     if cross_repository:
         return "pull request is from a fork"
@@ -168,6 +174,8 @@ def skip_reason(
         return "pull request is not open"
     if draft:
         return "pull request is a draft"
+    if mixes_governance(paths or [], config):
+        return "mixes governance and non-governance"
     if not required:
         return "no automerge labels configured"
     missing_labels = sorted(required - {label.strip() for label in labels})
@@ -295,7 +303,7 @@ def _pull_request(number: int, env: dict[str, str]) -> dict:
             "view",
             str(number),
             "--json",
-            "isDraft,state,mergeable,headRefOid,headRefName,baseRefName,labels,isCrossRepository",
+            "isDraft,state,mergeable,headRefOid,headRefName,baseRefName,baseRefOid,labels,isCrossRepository",
         ],
         env,
     )
@@ -456,6 +464,13 @@ def consider(number: int, env: dict[str, str]) -> bool:
         configured=configured_check_names(),
         discovered=discovered,
     )
+    base_ref = str(pull.get("baseRefOid") or pull.get("baseRefName") or "")
+    try:
+        config = load_effective_config(repo, base_ref, env) if repo and base_ref else None
+        paths = list_pr_paths(repo, number, env) if repo else []
+    except AddonError as exc:
+        print(f"#{number}: skip (governance config: {exc})")
+        return True
     reason = skip_reason(
         labels=labels,
         draft=bool(pull.get("isDraft")),
@@ -466,6 +481,8 @@ def consider(number: int, env: dict[str, str]) -> bool:
         mergeable=str(pull.get("mergeable") or ""),
         required=required_labels(),
         required_checks=required_checks,
+        paths=paths,
+        config=config,
     )
     if reason:
         print(f"#{number}: skip ({reason})")

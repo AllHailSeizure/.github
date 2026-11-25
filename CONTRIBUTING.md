@@ -7,6 +7,7 @@ These are personal repositories, maintained by one person plus a few automation 
 - Branch off `master` (lowercase). Do not use `main` or `Master`.
 - One pull request per change, targeted at `master`.
 - Fill in the pull request template. Link an issue with `Closes #N` when there is one.
+- A pull request that changes how the repo operates (governance) may not also change anything else; split them.
 
 ## Branch names
 
