@@ -1,0 +1,226 @@
+# Reusable Devvit tag release. A caller workflow triggers on `push: tags: ['v*']`
+# and calls this one; the job publishes THAT EXACT tagged commit to the Devvit
+# App Store, with the version taken from the tag.
+#
+# Lockstep (tag == package.json == package-lock.json == Devvit store) is
+# verified BEFORE anything is published, and CI never pushes a commit back. To
+# release: bump the version in a PR, merge it, then tag that commit (for
+# example `npm version patch`, then `git push origin vX.Y.Z`).
+#
+# Fails before publishing when: the run is not a tag push, the tag is not
+# strict 3-part SemVer (vMAJOR.MINOR.PATCH), the tag moved after the run
+# started, the commit is not on the default branch, package.json or
+# package-lock.json disagree with the tag, or DEVVIT_AUTH_TOKEN is missing.
+#
+# Caller example (the caller's job needs `permissions: contents: write`):
+#   on:
+#     push:
+#       tags: ['v*']
+#   jobs:
+#     release:
+#       permissions:
+#         contents: write
+#       uses: AllHailSeizure/.github/.github/workflows/devvit-release.yml@master
+#       with:
+#         visibility: unlisted   # or: public
+#       secrets:
+#         DEVVIT_AUTH_TOKEN: ${{ secrets.DEVVIT_AUTH_TOKEN }}
+#
+# Concurrency: one release per repository at a time, and a running release is
+# never cancelled. GitHub keeps only ONE queued run per group, so a third tag
+# pushed while two are waiting cancels the older queued one. Push tags one at a
+# time.
+name: Devvit tag release
+
+"on":
+  workflow_call:
+    inputs:
+      visibility:
+        description: Devvit App Store publish visibility, `unlisted` or `public`
+        type: string
+        required: false
+        default: unlisted
+    secrets:
+      DEVVIT_AUTH_TOKEN:
+        description: Full raw contents of a logged-in ~/.devvit/token file
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Publish to Devvit App Store
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # Least privilege: this is the only job that sees DEVVIT_AUTH_TOKEN, and it
+    # cannot write to the repository.
+    permissions:
+      contents: read
+    concurrency:
+      group: devvit-release-${{ github.repository }}
+      cancel-in-progress: false
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
+    steps:
+      - name: Require a tag push
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          VISIBILITY: ${{ inputs.visibility }}
+        shell: bash
+        run: |
+          if [[ "$EVENT_NAME" != "push" || "$REF_TYPE" != "tag" ]]; then
+            echo "::error::Devvit releases run only on a tag push (got event '$EVENT_NAME', ref type '$REF_TYPE')."
+            exit 1
+          fi
+          if [[ "$VISIBILITY" != "unlisted" && "$VISIBILITY" != "public" ]]; then
+            echo "::error::visibility must be 'unlisted' or 'public' (got '$VISIBILITY')."
+            exit 1
+          fi
+
+      # Pinned to the commit the tag push resolved to, not to a branch or to a
+      # tag name that could be moved while the run is queued.
+      - name: Checkout the tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate tag and lockstep versions
+        id: ver
+        env:
+          TAG: ${{ github.ref_name }}
+          RUN_SHA: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          semver='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          if ! [[ "$TAG" =~ $semver ]]; then
+            echo "::error::Tag '$TAG' is not strict 3-part SemVer (vMAJOR.MINOR.PATCH, e.g. v1.2.3). Nothing was published."
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+
+          # The tag must still point at the commit this run was started for.
+          TAG_SHA=$(git rev-parse "refs/tags/$TAG^{commit}")
+          RUN_COMMIT=$(git rev-parse "$RUN_SHA^{commit}")
+          HEAD_SHA=$(git rev-parse HEAD)
+          if [[ "$TAG_SHA" != "$RUN_COMMIT" || "$HEAD_SHA" != "$RUN_COMMIT" ]]; then
+            echo "::error::Tag $TAG ($TAG_SHA) no longer matches the commit this run was triggered for ($RUN_COMMIT). Nothing was published."
+            exit 1
+          fi
+
+          # Only commits that are on the default branch may be released.
+          if ! git merge-base --is-ancestor "$RUN_COMMIT" "origin/$DEFAULT_BRANCH"; then
+            echo "::error::Commit $RUN_COMMIT is not on $DEFAULT_BRANCH. Tag a commit that has been merged. Nothing was published."
+            exit 1
+          fi
+
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          LOCK_VERSION=$(node -p "const l=require('./package-lock.json'); [l.version, l.packages && l.packages[''] && l.packages[''].version].join(' ')")
+          if [[ "$PKG_VERSION" != "$VERSION" ]]; then
+            echo "::error::package.json version '$PKG_VERSION' does not match tag $TAG. Bump it in a merged commit, then tag that commit. Nothing was published."
+            exit 1
+          fi
+          for v in $LOCK_VERSION; do
+            if [[ "$v" != "$VERSION" ]]; then
+              echo "::error::package-lock.json version '$v' does not match tag $TAG. Run 'npm version' or 'npm install --package-lock-only'. Nothing was published."
+              exit 1
+            fi
+          done
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Run full check (lint, typecheck, test, build)
+        run: npm run check
+
+      - name: Verify Devvit authentication
+        env:
+          DEVVIT_AUTH_TOKEN: ${{ secrets.DEVVIT_AUTH_TOKEN }}
+        shell: bash
+        run: |
+          if [[ -z "$DEVVIT_AUTH_TOKEN" ]]; then
+            echo "::error::Missing DEVVIT_AUTH_TOKEN secret (repository or organization). See README.md. Nothing was published."
+            exit 1
+          fi
+          npx --no devvit whoami </dev/null
+          npx --no devvit list apps </dev/null
+
+      - name: Publish to Devvit App Store
+        env:
+          DEVVIT_AUTH_TOKEN: ${{ secrets.DEVVIT_AUTH_TOKEN }}
+          DEVVIT_ALLOW_SOURCE_UPLOAD: '1'
+          VERSION: ${{ steps.ver.outputs.version }}
+          VISIBILITY: ${{ inputs.visibility }}
+        shell: bash
+        run: |
+          args=(publish --version "$VERSION")
+          if [[ "$VISIBILITY" == "public" ]]; then
+            args+=(--public)
+          fi
+          npx --no devvit "${args[@]}" </dev/null
+
+      - name: Assert the store has the tagged version
+        env:
+          DEVVIT_AUTH_TOKEN: ${{ secrets.DEVVIT_AUTH_TOKEN }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        shell: bash
+        run: |
+          PUBLISHED=$(npx --no devvit view "@$VERSION" version </dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | tail -n 1 || true)
+          echo "tag / package.json: $VERSION"
+          echo "Devvit store:       $PUBLISHED"
+          if [[ "$PUBLISHED" != "$VERSION" ]]; then
+            echo "::error::Devvit published version '$PUBLISHED' != '$VERSION'"
+            exit 1
+          fi
+
+      - name: Write job summary
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          VISIBILITY: ${{ inputs.visibility }}
+        run: |
+          printf '### Published %s\n\n- Version: `%s`\n- Tag: `%s`\n- Visibility: `%s`\n- Commit: `%s`\n' \
+            "$GITHUB_REPOSITORY" "$VERSION" "$TAG" "$VISIBILITY" "$(git rev-parse HEAD)" >> "$GITHUB_STEP_SUMMARY"
+
+  github-release:
+    name: Create GitHub Release
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # The only job that can write to the repository; it never sees the Devvit
+    # token and only runs after a successful publish.
+    permissions:
+      contents: write
+    steps:
+      - name: Create GitHub Release for the existing tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.publish.outputs.tag }}
+          VERSION: ${{ needs.publish.outputs.version }}
+          VISIBILITY: ${{ inputs.visibility }}
+        shell: bash
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "GitHub Release $TAG already exists; leaving it as is."
+            exit 0
+          fi
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "$TAG" \
+            --generate-notes \
+            --notes "Devvit App Store version \`$VERSION\` (visibility: \`$VISIBILITY\`)."
