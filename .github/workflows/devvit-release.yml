@@ -10,16 +10,22 @@
 # Fails before publishing when: the run is not a tag push, the tag is not
 # strict 3-part SemVer (vMAJOR.MINOR.PATCH), the tag moved after the run
 # started, the commit is not on the default branch, package.json or
-# package-lock.json disagree with the tag, or DEVVIT_AUTH_TOKEN is missing.
+# package-lock.json disagree with the tag, DEVVIT_AUTH_TOKEN is missing, CI on
+# the tagged commit is not green, or LICENSE / README.md is missing or empty.
+# The last two are the shared release-gates.yml, run first as the `gates` job.
 #
-# Caller example (the caller's job needs `permissions: contents: write`):
+# Caller example (the caller's job must grant every permission listed; a
+# called workflow cannot be granted more than its caller has):
 #   on:
 #     push:
 #       tags: ['v*']
 #   jobs:
 #     release:
 #       permissions:
-#         contents: write
+#         contents: write   # GitHub Release
+#         actions: read     # release gates: read CI workflow runs
+#         checks: read      # release gates: read check runs
+#         statuses: read    # release gates: read commit statuses
 #       uses: AllHailSeizure/.github/.github/workflows/devvit-release.yml@master
 #       with:
 #         visibility: unlisted   # or: public
@@ -49,8 +55,18 @@ permissions:
   contents: read
 
 jobs:
+  gates:
+    name: Release gates
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      statuses: read
+    uses: AllHailSeizure/.github/.github/workflows/release-gates.yml@master
+
   publish:
     name: Publish to Devvit App Store
+    needs: gates
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     # Least privilege: this is the only job that sees DEVVIT_AUTH_TOKEN, and it
