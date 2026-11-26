@@ -1,0 +1,235 @@
+# Reusable release gates. Run this as the first job of any tag-triggered
+# release and make the publish job `needs:` it. It fails, before anything is
+# published, unless BOTH hold for the tagged commit:
+#
+#   1. CI is green: every workflow run, check run and commit status on that
+#      sha has passed (success, skipped or neutral), except
+#        - the release's own run (it would wait on itself), and
+#        - workflows named in `ignored_workflows` (default: Deploy GitHub Pages).
+#      Checks that are still queued or in progress are polled until
+#      `ci_timeout_minutes`, then the gate fails. A failed check fails it at
+#      once. Finding no CI at all is a failure (no green evidence): it is given
+#      a 5 minute grace for CI to start, then fails.
+#   2. A non-empty LICENSE and README.md exist at the root of the tagged commit.
+#
+# Caller example (the calling job must grant the four read permissions below;
+# a called workflow cannot be granted more than its caller has):
+#   jobs:
+#     gates:
+#       permissions:
+#         contents: read
+#         actions: read
+#         checks: read
+#         statuses: read
+#       uses: AllHailSeizure/.github/.github/workflows/release-gates.yml@master
+#     publish:
+#       needs: gates
+#       ...
+name: Release gates
+
+"on":
+  workflow_call:
+    inputs:
+      ignored_workflows:
+        description: Comma-separated workflow names whose runs and checks are not required to pass
+        type: string
+        required: false
+        default: Deploy GitHub Pages
+      ci_timeout_minutes:
+        description: How long to wait for queued or running checks before failing
+        type: number
+        required: false
+        default: 25
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    name: Release gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      statuses: read
+    steps:
+      - name: Require a tag push
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        shell: bash
+        run: |
+          if [[ "$EVENT_NAME" != "push" || "$REF_TYPE" != "tag" ]]; then
+            echo "::error::Release gates run only on a tag push (got event '$EVENT_NAME', ref type '$REF_TYPE')."
+            exit 1
+          fi
+
+      - name: Checkout the tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Gate 2 - LICENSE and README.md exist and are not empty
+        env:
+          RUN_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          if [[ "$(git rev-parse HEAD)" != "$(git rev-parse "$RUN_SHA^{commit}")" ]]; then
+            echo "::error::Checked-out commit is not the commit this run was triggered for."
+            exit 1
+          fi
+          fail=0
+          for f in LICENSE README.md; do
+            mode=$(git ls-tree HEAD -- "$f" | awk '{print $1}')
+            if [[ ! "$mode" =~ ^100(644|755)$ ]]; then
+              echo "::error::$f is missing at the tagged commit $RUN_SHA (it must be a regular file at the repository root). Nothing was published."
+              fail=1
+            elif ! git cat-file blob "HEAD:$f" | grep -q '[^[:space:]]'; then
+              echo "::error::$f is empty at the tagged commit $RUN_SHA. Nothing was published."
+              fail=1
+            else
+              echo "$f present, $(git cat-file -s "HEAD:$f") bytes"
+            fi
+          done
+          exit "$fail"
+
+      - name: Gate 1 - CI on the tagged commit is green
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          OWN_RUN_ID: ${{ github.run_id }}
+          IGNORED_WORKFLOWS: ${{ inputs.ignored_workflows }}
+          TIMEOUT_MINUTES: ${{ inputs.ci_timeout_minutes }}
+          ZERO_CHECKS_GRACE_MINUTES: '5'
+          POLL_SECONDS: '30'
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          import time
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          sha = os.environ["SHA"]
+          own_run = int(os.environ["OWN_RUN_ID"])
+          ignored = {n.strip() for n in os.environ["IGNORED_WORKFLOWS"].split(",") if n.strip()}
+          timeout = float(os.environ["TIMEOUT_MINUTES"]) * 60
+          grace = float(os.environ["ZERO_CHECKS_GRACE_MINUTES"]) * 60
+          poll = float(os.environ["POLL_SECONDS"])
+          PASSED = {"success", "skipped", "neutral"}
+
+
+          def api(path):
+              out = subprocess.run(
+                  ["gh", "api", "--paginate", "--slurp", path],
+                  check=True, capture_output=True, text=True,
+              ).stdout
+              return json.loads(out)
+
+
+          def items(path, key=None):
+              found = []
+              for page in api(path):
+                  if key is None:
+                      found.extend(page if isinstance(page, list) else [page])
+                  else:
+                      found.extend(page.get(key, []))
+              return found
+
+
+          names_by_run = {}
+
+
+          def workflow_name(run_id):
+              if run_id not in names_by_run:
+                  try:
+                      names_by_run[run_id] = items(f"repos/{repo}/actions/runs/{run_id}")[0].get("name")
+                  except Exception:
+                      names_by_run[run_id] = None
+              return names_by_run[run_id]
+
+
+          def evaluate():
+              """Return (passed, failed, pending) lists of human-readable labels."""
+              passed, failed, pending = [], [], []
+
+              def record(label, status, conclusion):
+                  if status != "completed":
+                      pending.append(f"{label} ({status})")
+                  elif conclusion in PASSED:
+                      passed.append(label)
+                  else:
+                      failed.append(f"{label} ({conclusion})")
+
+              for run in items(f"repos/{repo}/actions/runs?head_sha={sha}&per_page=100", "workflow_runs"):
+                  names_by_run[run["id"]] = run.get("name")
+                  if run["id"] == own_run or run.get("name") in ignored:
+                      continue
+                  record(f"workflow run: {run.get('name')} #{run['id']}", run.get("status"), run.get("conclusion"))
+
+              for cr in items(f"repos/{repo}/commits/{sha}/check-runs?per_page=100", "check_runs"):
+                  match = re.search(r"/actions/runs/(\d+)", cr.get("details_url") or "")
+                  if match:
+                      rid = int(match.group(1))
+                      if rid == own_run or workflow_name(rid) in ignored:
+                          continue
+                  record(f"check run: {cr.get('name')}", cr.get("status"), cr.get("conclusion"))
+
+              seen = set()
+              for st in items(f"repos/{repo}/commits/{sha}/statuses?per_page=100"):
+                  ctx = st.get("context")
+                  if ctx in seen:
+                      continue
+                  seen.add(ctx)
+                  if ctx in ignored:
+                      continue
+                  state = st.get("state")
+                  if state == "pending":
+                      pending.append(f"status: {ctx} (pending)")
+                  elif state == "success":
+                      passed.append(f"status: {ctx}")
+                  else:
+                      failed.append(f"status: {ctx} ({state})")
+              return passed, failed, pending
+
+
+          def summary(lines):
+              path = os.environ.get("GITHUB_STEP_SUMMARY")
+              if path:
+                  with open(path, "a", encoding="utf-8") as fh:
+                      fh.write("\n".join(lines) + "\n")
+
+
+          start = time.monotonic()
+          while True:
+              passed, failed, pending = evaluate()
+              elapsed = time.monotonic() - start
+              print(f"[{int(elapsed)}s] passed={len(passed)} pending={len(pending)} failed={len(failed)}", flush=True)
+              if failed:
+                  for label in failed:
+                      print(f"::error::CI is not green on {sha}: {label}. Nothing was published.")
+                  summary(["### CI gate failed", *[f"- {x}" for x in failed]])
+                  sys.exit(1)
+              if not pending and passed:
+                  print(f"CI is green on {sha}:")
+                  for label in passed:
+                      print(f"  ok  {label}")
+                  summary([f"### CI gate passed ({len(passed)} checks)", *[f"- {x}" for x in passed]])
+                  sys.exit(0)
+              if not pending and not passed and elapsed >= grace:
+                  print(f"::error::No CI checks found on {sha}, so there is no green evidence. Nothing was published.")
+                  summary(["### CI gate failed", "- no CI checks found on the tagged commit"])
+                  sys.exit(1)
+              if elapsed >= timeout:
+                  for label in pending:
+                      print(f"::error::Still waiting after {int(timeout // 60)} min: {label}. Nothing was published.")
+                  summary(["### CI gate timed out", *[f"- {x}" for x in pending]])
+                  sys.exit(1)
+              time.sleep(poll)
+          PY
