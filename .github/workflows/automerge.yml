@@ -31,6 +31,11 @@ name: Automerge
         type: string
         required: false
         default: automerge
+      source_ref:
+        description: Ref of AllHailSeizure/.github to check out (the same pin as uses:). github.workflow_sha is the caller commit and is not in this repo.
+        type: string
+        required: false
+        default: master
 
 permissions:
   contents: write
@@ -47,14 +52,15 @@ jobs:
       actions: read
       checks: read
     steps:
-      # Checkout this defaults repo at the SHA the caller pinned, not the
-      # pull request under review. The job token can merge, so it must not
-      # run untrusted code.
+      # Checkout this defaults repo at inputs.source_ref (default master),
+      # not the pull request under review. github.workflow_sha is the calling
+      # workflow's commit and does not exist here. The job token can merge,
+      # so this must not run untrusted code.
       - name: Checkout AllHailSeizure/.github
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: AllHailSeizure/.github
-          ref: ${{ github.workflow_sha }}
+          ref: ${{ inputs.source_ref }}
           persist-credentials: false
 
       - name: Set up Python
