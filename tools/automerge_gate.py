@@ -208,13 +208,20 @@ def skip_reason(
     return None
 
 
-def merge_command(number: int, sha: str) -> list[str]:
-    """gh pr merge invocation. Never includes --admin (would bypass protection)."""
+def merge_command(number: int, sha: str, repo: str) -> list[str]:
+    """gh pr merge invocation. Never includes --admin (would bypass protection).
+
+    Always pass -R so the command targets the calling repo. This script is
+    checked out from AllHailSeizure/.github, and gh would otherwise infer
+    that repository from the working tree.
+    """
     return [
         "gh",
         "pr",
         "merge",
         str(number),
+        "-R",
+        repo,
         "--squash",
         "--delete-branch",
         "--match-head-commit",
@@ -296,12 +303,17 @@ def _quote(part: str) -> str:
 
 
 def _pull_request(number: int, env: dict[str, str]) -> dict:
+    repo = env.get("GITHUB_REPOSITORY", "")
+    if not repo:
+        raise SystemExit("GITHUB_REPOSITORY is not set")
     payload = _gh_json(
         [
             "gh",
             "pr",
             "view",
             str(number),
+            "-R",
+            repo,
             "--json",
             "isDraft,state,mergeable,headRefOid,headRefName,baseRefName,baseRefOid,labels,isCrossRepository",
         ],
@@ -436,7 +448,11 @@ def rollup_required_checks(repo: str, number: int, env: dict[str, str]) -> tuple
 
 
 def _squash_merge(number: int, sha: str, env: dict[str, str]) -> bool:
-    result = _run(merge_command(number, sha), env)
+    repo = env.get("GITHUB_REPOSITORY", "")
+    if not repo:
+        print("GITHUB_REPOSITORY is not set", file=sys.stderr)
+        return False
+    result = _run(merge_command(number, sha, repo), env)
     if result.returncode != 0:
         print(result.stderr or result.stdout, file=sys.stderr)
         return False

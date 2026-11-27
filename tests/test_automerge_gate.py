@@ -182,13 +182,14 @@ class SkipReasonTests(unittest.TestCase):
 
 class MergeCommandTests(unittest.TestCase):
     def test_squash_matches_head_and_never_bypasses(self) -> None:
-        cmd = gate.merge_command(12, "abc")
+        cmd = gate.merge_command(12, "abc", "AllHailSeizure/sidereel")
         self.assertIn("--squash", cmd)
         self.assertIn("--match-head-commit", cmd)
         self.assertIn("abc", cmd)
         self.assertNotIn("--admin", cmd)
         self.assertNotIn("--rebase", cmd)
         self.assertNotIn("--merge", cmd)
+        self.assertEqual(cmd[cmd.index("-R") + 1], "AllHailSeizure/sidereel")
 
 
 class CandidateTests(unittest.TestCase):
