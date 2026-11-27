@@ -13,8 +13,8 @@
 # Fails before publishing when: the run is not a tag push, the tag is not
 # strict 3-part SemVer (vMAJOR.MINOR.PATCH), the tag moved after the run
 # started, the commit is not on the default branch, package.json or
-# package-lock.json disagree with the tag, DEVVIT_AUTH_TOKEN is missing, CI on
-# the tagged commit is not green, or LICENSE / README.md is missing or empty.
+# package-lock.json disagree with the tag, CI on the tagged commit is not
+# green, or LICENSE / README.md is missing or empty.
 # The last two are the shared release-gates.yml, run first as the `gates` job.
 #
 # Caller example (the caller's job must grant every permission listed; a
@@ -32,8 +32,6 @@
 #       uses: AllHailSeizure/.github/.github/workflows/devvit-release.yml@master
 #       with:
 #         visibility: unlisted   # or: public
-#       secrets:
-#         DEVVIT_AUTH_TOKEN: ${{ secrets.DEVVIT_AUTH_TOKEN }}
 #
 # Concurrency: one release per repository at a time, and a running release is
 # never cancelled. GitHub keeps only ONE queued run per group, so a third tag
@@ -51,7 +49,6 @@ name: Devvit tag release
         default: unlisted
     secrets:
       DEVVIT_AUTH_TOKEN:
-        description: Full raw contents of a logged-in ~/.devvit/token file
         required: true
 
 permissions:
@@ -72,8 +69,7 @@ jobs:
     needs: gates
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    # Least privilege: this is the only job that sees DEVVIT_AUTH_TOKEN, and it
-    # cannot write to the repository.
+    # Least privilege: this job cannot write to the repository.
     permissions:
       contents: read
     concurrency:
@@ -172,7 +168,7 @@ jobs:
         shell: bash
         run: |
           if [[ -z "$DEVVIT_AUTH_TOKEN" ]]; then
-            echo "::error::Missing DEVVIT_AUTH_TOKEN secret (repository or organization). See README.md. Nothing was published."
+            echo "::error::Missing DEVVIT_AUTH_TOKEN secret (repository or organization). Nothing was published."
             exit 1
           fi
           npx --no devvit whoami </dev/null
@@ -220,8 +216,8 @@ jobs:
     needs: publish
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    # The only job that can write to the repository; it never sees the Devvit
-    # token and only runs after a successful publish.
+    # The only job that can write to the repository; it only runs after a
+    # successful publish.
     permissions:
       contents: write
     steps:
