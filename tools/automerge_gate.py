@@ -229,6 +229,61 @@ def merge_command(number: int, sha: str, repo: str) -> list[str]:
     ]
 
 
+def issue_repository(ref: object) -> str:
+    """Return owner/name from a closingIssuesReferences entry, or empty."""
+    if not isinstance(ref, dict):
+        return ""
+    repo = ref.get("repository")
+    if isinstance(repo, str) and "/" in repo:
+        return repo
+    if not isinstance(repo, dict):
+        return ""
+    owner = repo.get("owner")
+    login = owner.get("login") if isinstance(owner, dict) else owner
+    name = repo.get("name")
+    if login and name:
+        return f"{login}/{name}"
+    return ""
+
+
+def same_repo_linked_issue_numbers(refs: object, repo: str) -> tuple[int, ...]:
+    """Same-repo issue numbers from closingIssuesReferences. Other repos are skipped.
+
+    An entry with no repository is treated as belonging to repo.
+    """
+    if not repo or not isinstance(refs, list):
+        return ()
+    numbers: list[int] = []
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        home = issue_repository(ref)
+        if home and home != repo:
+            continue
+        number = ref.get("number")
+        if isinstance(number, int) and number > 0 and number not in numbers:
+            numbers.append(number)
+    return tuple(numbers)
+
+
+def linked_issue_comment(pull_number: int) -> str:
+    return f"Closed automatically after automerge of #{pull_number}."
+
+
+def close_issue_command(number: int, repo: str, comment: str) -> list[str]:
+    """gh issue close invocation. Always pass -R so gh targets the calling repo."""
+    return [
+        "gh",
+        "issue",
+        "close",
+        str(number),
+        "-R",
+        repo,
+        "--comment",
+        comment,
+    ]
+
+
 def candidate_numbers_from_env(env: dict[str, str]) -> tuple[list[int], str]:
     """Return PR numbers from reusable-workflow inputs, plus a SHA to look up."""
     raw = (env.get("AUTOMERGE_PULL_NUMBER") or "").strip()
@@ -315,7 +370,7 @@ def _pull_request(number: int, env: dict[str, str]) -> dict:
             "-R",
             repo,
             "--json",
-            "isDraft,state,mergeable,headRefOid,headRefName,baseRefName,baseRefOid,labels,isCrossRepository",
+            "isDraft,state,mergeable,headRefOid,headRefName,baseRefName,baseRefOid,labels,isCrossRepository,closingIssuesReferences",
         ],
         env,
     )
@@ -461,6 +516,54 @@ def _squash_merge(number: int, sha: str, env: dict[str, str]) -> bool:
     return True
 
 
+def _issue_state(number: int, repo: str, env: dict[str, str]) -> str:
+    result = _run(
+        ["gh", "api", f"repos/{repo}/issues/{number}", "--jq", ".state"],
+        env,
+    )
+    if result.returncode != 0:
+        print(result.stderr or result.stdout, file=sys.stderr)
+        return ""
+    return result.stdout.strip().lower()
+
+
+def close_linked_issues(
+    pull_number: int, refs: object, repo: str, env: dict[str, str]
+) -> bool:
+    """Close still-open same-repo issues linked by closingIssuesReferences.
+
+    Already-closed issues are left alone. A failed lookup or close is an error.
+    Cross-repo references are skipped.
+    """
+    if not repo:
+        print("GITHUB_REPOSITORY is not set", file=sys.stderr)
+        return False
+    ok = True
+    comment = linked_issue_comment(pull_number)
+    for number in same_repo_linked_issue_numbers(refs, repo):
+        state = _issue_state(number, repo, env)
+        if state == "closed":
+            print(f"#{pull_number}: issue #{number} already closed")
+            continue
+        if state != "open":
+            print(
+                f"#{pull_number}: failed to close issue #{number} "
+                f"(state {state or 'unknown'})",
+                file=sys.stderr,
+            )
+            ok = False
+            continue
+        result = _run(close_issue_command(number, repo, comment), env)
+        if result.returncode != 0:
+            print(result.stderr or result.stdout, file=sys.stderr)
+            ok = False
+            continue
+        if result.stdout.strip():
+            print(result.stdout.strip())
+        print(f"#{pull_number}: closed issue #{number}")
+    return ok
+
+
 def consider(number: int, env: dict[str, str]) -> bool:
     pull = _pull_request(number, env)
     sha = str(pull.get("headRefOid") or "")
@@ -504,7 +607,11 @@ def consider(number: int, env: dict[str, str]) -> bool:
         print(f"#{number}: skip ({reason})")
         return True
     print(f"#{number}: squash-merging")
-    return _squash_merge(number, sha, env)
+    if not _squash_merge(number, sha, env):
+        return False
+    return close_linked_issues(
+        number, pull.get("closingIssuesReferences"), repo, env
+    )
 
 
 def candidate_numbers(event_name: str, event: dict, env: dict[str, str]) -> list[int]:

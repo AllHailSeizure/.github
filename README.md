@@ -16,7 +16,7 @@ A file in an individual repo always takes precedence over the one here.
 
 ## Reusable workflows
 
-- **[Automerge](.github/workflows/automerge.yml)** squash-merges a PR labelled `automerge` once every required check passes. It never bypasses branch protection.
+- **[Automerge](.github/workflows/automerge.yml)** squash-merges a PR labelled `automerge` once every required check passes. It never bypasses branch protection. Callers must grant `contents: write`, `pull-requests: write`, and `issues: write` (plus `actions: read` and `checks: read`); without `issues: write`, GitHub silently skips auto-closing linked issues when the merge is done with `GITHUB_TOKEN`.
 - **[Governance separation](.github/workflows/governance.yml)** fails a PR that changes governance files (repo rules, CI, agent config; see [`governance.json`](governance.json)) together with anything else. A repo can add its own paths in `.github/governance.json`.
 
 Repos opt in with a short caller workflow that references these with `uses: AllHailSeizure/.github/.github/workflows/<name>.yml@master`.
