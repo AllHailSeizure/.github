@@ -4,8 +4,11 @@
 #
 # Lockstep (tag == package.json == package-lock.json == Devvit store) is
 # verified BEFORE anything is published, and CI never pushes a commit back. To
-# release: bump the version in a PR, merge it, then tag that commit (for
-# example `npm version patch`, then `git push origin vX.Y.Z`).
+# release: bump the version in a PR and merge it (Nate or Devviteloper may
+# merge Devvit PRs). Only Nate approves releases. Once Nate has approved a
+# release, Devviteloper pushes the vX.Y.Z tag (for example
+# `git tag -a vX.Y.Z -m "Release vX.Y.Z" && git push origin vX.Y.Z`). This
+# workflow does not enforce that approval; it is a process rule.
 #
 # Fails before publishing when: the run is not a tag push, the tag is not
 # strict 3-part SemVer (vMAJOR.MINOR.PATCH), the tag moved after the run
