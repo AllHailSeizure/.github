@@ -427,7 +427,7 @@ def _pulls_for_commit(sha: str, env: dict[str, str]) -> list[int]:
 def discover_required_checks(repo: str, branch: str, env: dict[str, str]) -> tuple[str, ...]:
     """Best-effort required check names from classic protection, rulesets, and the PR rollup.
 
-    GITHUB_TOKEN often cannot read protection or rulesets (no administration
+    Classic protection and rulesets often cannot be read (no administration
     permission). Failures are ignored; callers should also pass required_checks.
     """
     names: list[str] = []

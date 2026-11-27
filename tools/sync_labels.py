@@ -11,10 +11,7 @@ stay on issues and PRs. Deletes run only with --allow-deletes, and
 never remove a repo's must-keep labels (hotel-kline-game in particular).
 Scheduled Actions runs always apply and never delete.
 
-Auth uses the gh CLI (GH_TOKEN / a logged-in gh session). In Actions,
-set GH_TOKEN from the LABEL_SYNC_TOKEN secret (a fine-grained PAT with
-Issues read/write on the target repos). GITHUB_TOKEN cannot write
-labels on other repositories.
+Auth uses the gh CLI.
 
 Usage:
   python3 tools/sync_labels.py --dry-run
