@@ -12,6 +12,9 @@
 #      a 5 minute grace for CI to start, then fails.
 #   2. A non-empty LICENSE and README.md exist at the root of the tagged commit.
 #
+# This workflow does not check who pushed the tag (github.actor). Who may
+# push a release tag is a process rule documented by each calling project.
+#
 # Caller example (the calling job must grant the four read permissions below;
 # a called workflow cannot be granted more than its caller has):
 #   jobs:
