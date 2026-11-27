@@ -268,5 +268,73 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(sha, "")
 
 
+
+class LinkedIssueTests(unittest.TestCase):
+    def test_same_repo_keeps_order_and_uniques(self) -> None:
+        refs = [
+            {
+                "number": 7,
+                "repository": {"name": "sidereel", "owner": {"login": "AllHailSeizure"}},
+            },
+            {
+                "number": 7,
+                "repository": {"name": "sidereel", "owner": {"login": "AllHailSeizure"}},
+            },
+            {
+                "number": 9,
+                "repository": {"name": "sidereel", "owner": {"login": "AllHailSeizure"}},
+            },
+        ]
+        self.assertEqual(
+            gate.same_repo_linked_issue_numbers(refs, "AllHailSeizure/sidereel"),
+            (7, 9),
+        )
+
+    def test_skips_other_repositories(self) -> None:
+        refs = [
+            {
+                "number": 7,
+                "repository": {"name": "sidereel", "owner": {"login": "AllHailSeizure"}},
+            },
+            {
+                "number": 1,
+                "repository": {"name": "hotel-kline-game", "owner": {"login": "AllHailSeizure"}},
+            },
+        ]
+        self.assertEqual(
+            gate.same_repo_linked_issue_numbers(refs, "AllHailSeizure/sidereel"),
+            (7,),
+        )
+
+    def test_missing_repository_counts_as_same_repo(self) -> None:
+        self.assertEqual(
+            gate.same_repo_linked_issue_numbers([{"number": 4}], "AllHailSeizure/sidereel"),
+            (4,),
+        )
+
+    def test_empty_or_invalid(self) -> None:
+        self.assertEqual(gate.same_repo_linked_issue_numbers(None, "AllHailSeizure/sidereel"), ())
+        self.assertEqual(gate.same_repo_linked_issue_numbers([], "AllHailSeizure/sidereel"), ())
+        self.assertEqual(gate.same_repo_linked_issue_numbers([{"number": 4}], ""), ())
+
+    def test_close_command_targets_repo_and_comments(self) -> None:
+        cmd = gate.close_issue_command(7, "AllHailSeizure/sidereel", "Closed automatically after automerge of #64.")
+        self.assertEqual(cmd[cmd.index("-R") + 1], "AllHailSeizure/sidereel")
+        self.assertIn("--comment", cmd)
+        self.assertEqual(cmd[cmd.index("--comment") + 1], "Closed automatically after automerge of #64.")
+        self.assertEqual(cmd[:4], ["gh", "issue", "close", "7"])
+
+    def test_comment_names_the_pull_request(self) -> None:
+        self.assertEqual(
+            gate.linked_issue_comment(64),
+            "Closed automatically after automerge of #64.",
+        )
+
+    def test_merge_command_does_not_override_subject_or_body(self) -> None:
+        cmd = gate.merge_command(64, "abc", "AllHailSeizure/sidereel")
+        self.assertNotIn("--subject", cmd)
+        self.assertNotIn("--body", cmd)
+        self.assertNotIn("--admin", cmd)
+
 if __name__ == "__main__":
     unittest.main()
