@@ -56,7 +56,7 @@ jobs:
     steps:
       # Checkout this defaults repo at inputs.source_ref (default master),
       # not the pull request under review. github.workflow_sha is the calling
-      # workflow's commit and does not exist here. The job token can merge,
+      # workflow's commit and does not exist here. The job can merge,
       # so this must not run untrusted code.
       - name: Checkout AllHailSeizure/.github
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
