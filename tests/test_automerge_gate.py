@@ -480,8 +480,9 @@ class UpdateAndDispatchTests(unittest.TestCase):
         with mock.patch.object(gate, "_run", fake_run), mock.patch.object(
             gate, "UPDATE_WAIT_SECONDS", 0.05
         ), mock.patch.object(gate, "UPDATE_POLL_SECONDS", 0.01):
-            ok = gate.update_and_dispatch(90, "old", "feat/x", "master", self.REPO, {})
-        return ok, calls
+            outcome = gate.update_and_dispatch(90, "old", "feat/x", "master", self.REPO, {})
+        self.outcome = outcome
+        return outcome.ok, calls
 
     @staticmethod
     def _has(calls, needle):
@@ -490,6 +491,7 @@ class UpdateAndDispatchTests(unittest.TestCase):
     def test_updates_then_dispatches(self) -> None:
         ok, calls = self._run_flow()
         self.assertTrue(ok)
+        self.assertEqual(self.outcome.updated_sha, "new")
         self.assertTrue(self._has(calls, "update-branch"))
         self.assertTrue(self._has(calls, "workflows/ci.yml/dispatches"))
         names = [" ".join(c) for c in calls]
@@ -507,6 +509,7 @@ class UpdateAndDispatchTests(unittest.TestCase):
     def test_conflict_is_not_a_failure_and_not_dispatched(self) -> None:
         ok, calls = self._run_flow(update_rc=1, update_err="merge conflict between base and head (HTTP 422)")
         self.assertTrue(ok)
+        self.assertEqual(self.outcome.updated_sha, "")
         self.assertFalse(self._has(calls, "dispatches"))
 
     def test_stale_head_is_benign(self) -> None:
@@ -521,6 +524,103 @@ class UpdateAndDispatchTests(unittest.TestCase):
 
     def test_dispatch_failure_fails_the_run(self) -> None:
         ok, _ = self._run_flow(dispatch_ok=False)
+        self.assertFalse(ok)
+
+
+class ChecksFinishedTests(unittest.TestCase):
+    NAMES = ("test", "lint")
+
+    def test_all_completed_on_sha(self) -> None:
+        self.assertTrue(gate.checks_finished(_green("abc"), self.NAMES, "abc"))
+
+    def test_failed_still_counts_as_finished(self) -> None:
+        runs = _green("abc")
+        runs["lint"] = _check("lint", head_sha="abc", conclusion="failure")
+        self.assertTrue(gate.checks_finished(runs, self.NAMES, "abc"))
+
+    def test_in_progress_is_not_finished(self) -> None:
+        runs = _green("abc")
+        runs["test"] = _check("test", head_sha="abc", status="in_progress", conclusion="")
+        self.assertFalse(gate.checks_finished(runs, self.NAMES, "abc"))
+
+    def test_missing_or_other_sha_is_not_finished(self) -> None:
+        self.assertFalse(gate.checks_finished({"test": _check("test", head_sha="abc")}, self.NAMES, "abc"))
+        self.assertFalse(gate.checks_finished(_green("old"), self.NAMES, "new"))
+
+    def test_no_required_checks_never_finishes(self) -> None:
+        self.assertFalse(gate.checks_finished({}, (), "abc"))
+
+
+class ProcessQueueTests(unittest.TestCase):
+    """process() with consider/wait_for_ci faked: update, wait, merge, next PR."""
+
+    def _drive(self, script: dict[int, list], following=None, wait_ok=True):
+        calls: list[tuple] = []
+        scripts = {n: list(items) for n, items in script.items()}
+
+        def fake_consider(number, env, *, allow_merge=True):
+            calls.append(("consider", number, allow_merge))
+            return scripts[number].pop(0)
+
+        def fake_wait(number, sha, deadline, env):
+            calls.append(("wait", number, sha))
+            return wait_ok
+
+        pending = [following]
+
+        def fake_next(merged, branch, env):
+            calls.append(("next", merged))
+            return pending.pop(0) if pending else None
+
+        with mock.patch.object(gate, "consider", fake_consider), mock.patch.object(
+            gate, "wait_for_ci", fake_wait
+        ), mock.patch.object(gate, "next_behind", fake_next), mock.patch.object(
+            gate, "_pull_request", lambda n, e: {"baseRefName": "master"}
+        ):
+            ok = gate.process(90, {})
+        return ok, calls
+
+    def test_merge_ready_pr_then_nothing_behind(self) -> None:
+        ok, calls = self._drive({90: [gate.Outcome(True, merged=True)]})
+        self.assertTrue(ok)
+        self.assertEqual(calls, [("consider", 90, True), ("next", 90)])
+
+    def test_behind_pr_is_updated_waited_for_then_merged(self) -> None:
+        ok, calls = self._drive(
+            {90: [gate.Outcome(True, updated_sha="new"), gate.Outcome(True, merged=True)]}
+        )
+        self.assertTrue(ok)
+        self.assertEqual(
+            calls,
+            [("consider", 90, True), ("wait", 90, "new"), ("consider", 90, True), ("next", 90)],
+        )
+
+    def test_failed_ci_leaves_the_pr_alone(self) -> None:
+        ok, calls = self._drive(
+            {90: [gate.Outcome(True, updated_sha="new"), gate.Outcome(True)]}
+        )
+        self.assertTrue(ok)
+        self.assertNotIn(("next", 90), calls)
+
+    def test_wait_timeout_stops_quietly(self) -> None:
+        ok, calls = self._drive({90: [gate.Outcome(True, updated_sha="new")]}, wait_ok=False)
+        self.assertTrue(ok)
+        self.assertEqual(calls, [("consider", 90, True), ("wait", 90, "new")])
+
+    def test_next_pr_is_carried_through_after_a_merge(self) -> None:
+        ok, calls = self._drive(
+            {
+                90: [gate.Outcome(True, merged=True)],
+                91: [gate.Outcome(True, merged=True)],
+            },
+            following=(91, gate.Outcome(True, updated_sha="n91")),
+        )
+        self.assertTrue(ok)
+        self.assertIn(("wait", 91, "n91"), calls)
+        self.assertIn(("consider", 91, True), calls)
+
+    def test_failure_fails_the_run(self) -> None:
+        ok, _ = self._drive({90: [gate.Outcome(False)]})
         self.assertFalse(ok)
 
 
