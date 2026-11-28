@@ -10,7 +10,7 @@ governance-separation check.
 When the base branch requires branches to be up to date and an otherwise
 merge-ready PR is behind it, the gate brings the branch up to date with the
 update-branch API and dispatches the repo's CI workflow on the branch. Pushes
-made with the workflow token do not start pull_request runs, but a
+made by a workflow do not start pull_request runs, but a
 workflow_dispatch run is allowed, and its check runs land on the new head. After
 a merge it does the same for other open labelled PRs. It never loosens a check:
 the required checks must be green on the new head before anything merges.
@@ -768,7 +768,7 @@ def update_and_dispatch(
             reason = f"it conflicts with `{base_branch}`. Resolve the conflicts and push."
             kind = "conflict"
         else:
-            reason = "GitHub refused the automatic update (for example the new commits change workflow files, which the workflow token cannot push). Use Update branch by hand."
+            reason = "GitHub refused the automatic update (for example the new commits change workflow files, which a workflow cannot push). Use Update branch by hand."
             kind = "update-refused"
         print(f"#{number}: not updated ({kind})")
         _post_notice(
