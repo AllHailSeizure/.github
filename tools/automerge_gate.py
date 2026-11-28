@@ -10,10 +10,12 @@ governance-separation check.
 When the base branch requires branches to be up to date and an otherwise
 merge-ready PR is behind it, the gate brings the branch up to date with the
 update-branch API and dispatches the repo's CI workflow on the branch. Pushes
-made by a workflow do not start pull_request runs, but a
-workflow_dispatch run is allowed, and its check runs land on the new head. After
-a merge it does the same for other open labelled PRs. It never loosens a check:
-the required checks must be green on the new head before anything merges.
+made by a workflow do not start pull_request runs, and a workflow_dispatch run
+does not start the caller's workflow_run trigger either, so the gate waits for
+that CI run itself and then merges. It never loosens a check: the required
+checks must be green on the new head. After a merge it updates the next
+labelled PR the merge left behind, one at a time, and carries it through the
+same way.
 
 The script is self-contained. It does not import hotel-kline-game Tools/.
 """
@@ -28,7 +30,7 @@ import sys
 import time
 import urllib.parse
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from governance import AddonError, load_effective_config, list_pr_paths, mixes_governance
 
@@ -42,6 +44,12 @@ WORKFLOW_RUN_EVENTS = frozenset({"pull_request", "workflow_dispatch"})
 
 # Default CI workflow file to dispatch after update-branch (AUTOMERGE_CI_WORKFLOW).
 DEFAULT_CI_WORKFLOW = "ci.yml"
+# How long the gate waits for the dispatched CI run (AUTOMERGE_WAIT_MINUTES
+# overrides it), how often it looks, and how long one queue run may last.
+CI_WAIT_SECONDS = 40 * 60
+CI_POLL_SECONDS = 30
+QUEUE_TOTAL_SECONDS = 140 * 60
+MAX_QUEUE_STEPS = 60
 # Seconds to wait for update-branch (asynchronous) to move the PR head.
 UPDATE_WAIT_SECONDS = 90
 UPDATE_POLL_SECONDS = 3
@@ -726,6 +734,14 @@ def _head_sha(number: int, repo: str, env: dict[str, str]) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
+class Outcome(NamedTuple):
+    """Result of handling one PR. ok False fails the run."""
+
+    ok: bool
+    updated_sha: str = ""  # head after the gate updated the branch and dispatched CI
+    merged: bool = False
+
+
 def update_and_dispatch(
     number: int,
     sha: str,
@@ -733,12 +749,13 @@ def update_and_dispatch(
     base_branch: str,
     repo: str,
     env: dict[str, str],
-) -> bool:
+) -> Outcome:
     """Merge the base branch into the PR branch, then dispatch CI on the branch.
 
-    Returns False only when the PR is left stuck by a failure the gate caused
+    Returns ok False only when the PR is left stuck by a failure the gate caused
     (the update landed but CI could not be started). Conflicts and refused
-    updates are reported on the PR and are not failures.
+    updates are reported on the PR and are not failures. updated_sha is set
+    when CI was dispatched on the new head.
     """
     workflow = env.get("AUTOMERGE_CI_WORKFLOW") or DEFAULT_CI_WORKFLOW
     if not _ci_supports_dispatch(repo, workflow, base_branch, env):
@@ -756,13 +773,13 @@ def update_and_dispatch(
             repo,
             env,
         )
-        return True
+        return Outcome(True)
     result = _run(update_branch_command(repo, number, sha), env)
     if result.returncode != 0:
         text = result.stderr or result.stdout
         if is_stale_head_error(text):
             print(f"#{number}: head moved while updating; a later run will handle it")
-            return True
+            return Outcome(True)
         print(text, file=sys.stderr)
         if is_conflict_error(text):
             reason = f"it conflicts with `{base_branch}`. Resolve the conflicts and push."
@@ -779,7 +796,7 @@ def update_and_dispatch(
             repo,
             env,
         )
-        return True
+        return Outcome(True)
     print(f"#{number}: updating branch from {base_branch}")
     new_sha = sha
     deadline = time.monotonic() + UPDATE_WAIT_SECONDS
@@ -790,7 +807,7 @@ def update_and_dispatch(
         time.sleep(UPDATE_POLL_SECONDS)
     if new_sha == sha:
         print(f"#{number}: update requested but the head did not move", file=sys.stderr)
-        return False
+        return Outcome(False)
     dispatch = _run(dispatch_command(repo, workflow, head_ref), env)
     if dispatch.returncode != 0:
         print(dispatch.stderr or dispatch.stdout, file=sys.stderr)
@@ -803,12 +820,11 @@ def update_and_dispatch(
             repo,
             env,
         )
-        return False
+        return Outcome(False)
     print(
-        f"#{number}: updated {sha[:7]} -> {new_sha[:7]} and dispatched {workflow} on {head_ref}; "
-        "the gate runs again when CI completes"
+        f"#{number}: updated {sha[:7]} -> {new_sha[:7]} and dispatched {workflow} on {head_ref}"
     )
-    return True
+    return Outcome(True, updated_sha=new_sha)
 
 
 def _issue_state(number: int, repo: str, env: dict[str, str]) -> str:
@@ -859,11 +875,11 @@ def close_linked_issues(
     return ok
 
 
-def consider(number: int, env: dict[str, str], *, allow_merge: bool = True) -> bool:
+def consider(number: int, env: dict[str, str], *, allow_merge: bool = True) -> Outcome:
     """Merge a ready PR, or bring it up to date when it is behind its base.
 
-    With allow_merge false (the sweep after a merge) a ready PR is only updated
-    when behind; it is never merged.
+    With allow_merge false (picking the next PR after a merge) a ready PR is
+    only updated when behind; it is never merged.
     """
     pull = _pull_request(number, env)
     sha = str(pull.get("headRefOid") or "")
@@ -889,7 +905,7 @@ def consider(number: int, env: dict[str, str], *, allow_merge: bool = True) -> b
         paths = list_pr_paths(repo, number, env) if repo else []
     except AddonError as exc:
         print(f"#{number}: skip (governance config: {exc})")
-        return True
+        return Outcome(True)
     reason = skip_reason(
         labels=labels,
         draft=bool(pull.get("isDraft")),
@@ -915,23 +931,22 @@ def consider(number: int, env: dict[str, str], *, allow_merge: bool = True) -> b
                 repo,
                 env,
             )
-        return True
+        return Outcome(True)
     head_ref = str(pull.get("headRefName") or "")
     if _behind_and_must_update(pull, sha, branch, repo, env):
         return update_and_dispatch(number, sha, head_ref, branch, repo, env)
     if not allow_merge:
         print(f"#{number}: not behind {branch}; left for its own run")
-        return True
+        return Outcome(True)
     print(f"#{number}: squash-merging")
     merged, error = _squash_merge(number, sha, env)
     if not merged:
         if is_not_up_to_date_error(error):
             print(f"#{number}: base moved before the merge; updating instead")
             return update_and_dispatch(number, sha, head_ref, branch, repo, env)
-        return False
+        return Outcome(False)
     ok = close_linked_issues(number, pull.get("closingIssuesReferences"), repo, env)
-    sweep_behind(number, branch, env)
-    return ok
+    return Outcome(ok, merged=True)
 
 
 def _behind_and_must_update(
@@ -963,18 +978,111 @@ def labelled_open_numbers(branch: str, env: dict[str, str]) -> list[int]:
     return [int(line) for line in result.stdout.split() if line.strip().isdigit()]
 
 
-def sweep_behind(merged_number: int, branch: str, env: dict[str, str]) -> None:
-    """After a merge, update other labelled PRs that the merge left behind.
+def next_behind(
+    merged_number: int, branch: str, env: dict[str, str]
+) -> tuple[int, Outcome] | None:
+    """After a merge, update the first other labelled PR the merge left behind.
 
-    Best effort: problems are reported but never fail the merge that triggered it.
+    One at a time keeps the queue serial: each update costs a CI run, and the
+    next merge would leave every other updated PR behind again. Returns that
+    PR's number and outcome, or None when nothing was updated. Problems are
+    reported but never fail the merge that led here.
     """
     for other in labelled_open_numbers(branch, env):
         if other == merged_number:
             continue
         try:
-            consider(other, env, allow_merge=False)
+            outcome = consider(other, env, allow_merge=False)
         except SystemExit as exc:
-            print(f"#{other}: sweep skipped (exit {exc.code})", file=sys.stderr)
+            print(f"#{other}: skipped (exit {exc.code})", file=sys.stderr)
+            continue
+        if outcome.updated_sha:
+            return other, outcome
+    return None
+
+
+def _wait_seconds(env: dict[str, str]) -> float:
+    raw = (env.get("AUTOMERGE_WAIT_MINUTES") or "").strip()
+    try:
+        minutes = float(raw)
+    except ValueError:
+        return CI_WAIT_SECONDS
+    return minutes * 60 if minutes > 0 else CI_WAIT_SECONDS
+
+
+def checks_finished(
+    runs: dict[str, dict], required_checks: tuple[str, ...], sha: str
+) -> bool:
+    """True when every required check has a completed run on sha."""
+    if not required_checks:
+        return False
+    for name in required_checks:
+        run = runs.get(name)
+        if not run or str(run.get("head_sha") or "") != sha:
+            return False
+        if str(run.get("status") or "") != "completed":
+            return False
+    return True
+
+
+def wait_for_ci(number: int, sha: str, deadline: float, env: dict[str, str]) -> bool:
+    """Wait for the dispatched CI run on sha to finish. False on timeout.
+
+    Returns early when the PR head moves or the PR closes; the caller looks at
+    the PR again either way.
+    """
+    repo = env.get("GITHUB_REPOSITORY", "")
+    limit = min(deadline, time.monotonic() + _wait_seconds(env))
+    while time.monotonic() < limit:
+        pull = _pull_request(number, env)
+        if str(pull.get("state") or "") != "OPEN":
+            return True
+        head = str(pull.get("headRefOid") or "")
+        if head and head != sha:
+            print(f"#{number}: head moved to {head[:7]} while waiting for CI")
+            return True
+        required = collect_required_checks(
+            configured=configured_check_names(),
+            discovered=discover_required_checks(
+                repo, str(pull.get("baseRefName") or ""), env
+            ),
+        )
+        if checks_finished(_check_runs(sha, env), required, sha):
+            return True
+        time.sleep(CI_POLL_SECONDS)
+    print(f"#{number}: CI on {sha[:7]} did not finish in time; leaving it", file=sys.stderr)
+    return False
+
+
+def process(number: int, env: dict[str, str]) -> bool:
+    """Carry a PR through: merge it, or update it, wait for CI, then merge it.
+
+    After a merge the next behind PR is updated and carried through the same
+    way, until nothing is left or the time budget is spent.
+    """
+    deadline = time.monotonic() + QUEUE_TOTAL_SECONDS
+    current = number
+    allow_merge = True
+    for _ in range(MAX_QUEUE_STEPS):
+        outcome = consider(current, env, allow_merge=allow_merge)
+        if not outcome.ok:
+            return False
+        if outcome.updated_sha:
+            if not wait_for_ci(current, outcome.updated_sha, deadline, env):
+                return True
+            allow_merge = True
+            continue
+        if not outcome.merged or time.monotonic() >= deadline:
+            return True
+        branch = str(_pull_request(current, env).get("baseRefName") or "")
+        following = next_behind(current, branch, env)
+        if following is None:
+            return True
+        current, outcome = following
+        if not wait_for_ci(current, outcome.updated_sha, deadline, env):
+            return True
+        allow_merge = True
+    return True
 
 
 def candidate_numbers(event_name: str, event: dict, env: dict[str, str]) -> list[int]:
@@ -1008,7 +1116,7 @@ def main() -> None:
         if number in seen:
             continue
         seen.add(number)
-        if not consider(number, env):
+        if not process(number, env):
             failed = True
     if failed:
         raise SystemExit(1)
