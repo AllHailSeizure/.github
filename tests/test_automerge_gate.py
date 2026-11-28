@@ -396,19 +396,6 @@ class ErrorClassifierTests(unittest.TestCase):
         self.assertFalse(gate.is_stale_head_error("merge conflict"))
 
 
-class WorkflowDispatchDetectionTests(unittest.TestCase):
-    def test_mapping_form(self) -> None:
-        self.assertTrue(gate.workflow_has_dispatch("on:\n  pull_request:\n  workflow_dispatch:\n"))
-
-    def test_list_and_inline_forms(self) -> None:
-        self.assertTrue(gate.workflow_has_dispatch("on: [push, workflow_dispatch]\n"))
-        self.assertTrue(gate.workflow_has_dispatch("on:\n  - workflow_dispatch\n"))
-
-    def test_comment_and_absent(self) -> None:
-        self.assertFalse(gate.workflow_has_dispatch("on:\n  push:\n# workflow_dispatch:\n"))
-        self.assertFalse(gate.workflow_has_dispatch("on:\n  pull_request:\n"))
-
-
 class CommandTests(unittest.TestCase):
     def test_update_branch_is_merge_method_pinned_to_head(self) -> None:
         cmd = gate.update_branch_command("AllHailSeizure/sidereel", 90, "abc")
@@ -417,114 +404,125 @@ class CommandTests(unittest.TestCase):
         self.assertIn("expected_head_sha=abc", cmd)
         self.assertFalse([part for part in cmd if "rebase" in part])
 
-    def test_dispatch_targets_workflow_and_branch(self) -> None:
-        cmd = gate.dispatch_command("AllHailSeizure/sidereel", "ci.yml", "feat/x")
-        self.assertIn("repos/AllHailSeizure/sidereel/actions/workflows/ci.yml/dispatches", cmd)
-        self.assertIn("ref=feat/x", cmd)
+    def test_approve_targets_the_run(self) -> None:
+        cmd = gate.approve_command("AllHailSeizure/sidereel", 123)
+        self.assertEqual(cmd[:4], ["gh", "api", "-X", "POST"])
+        self.assertIn("repos/AllHailSeizure/sidereel/actions/runs/123/approve", cmd)
 
     def test_notice_marker_is_per_kind_and_sha(self) -> None:
         self.assertNotEqual(gate.notice_marker("conflict", "a"), gate.notice_marker("conflict", "b"))
         self.assertIn(gate.notice_marker("conflict", "a"), gate.notice_body("conflict", "a", "text"))
 
 
+class RunApprovalTests(unittest.TestCase):
+    def test_held_pull_request_run_needs_approval(self) -> None:
+        runs = [
+            {"id": 1, "event": "pull_request", "status": "completed", "conclusion": "action_required"},
+            {"id": 2, "event": "pull_request", "status": "completed", "conclusion": "success"},
+            {"id": 3, "event": "pull_request_target", "status": "completed", "conclusion": "action_required"},
+            {"id": 4, "event": "pull_request", "status": "action_required", "conclusion": None},
+        ]
+        self.assertEqual(gate.runs_needing_approval(runs), [1, 4])
+
+    def test_garbage_is_ignored(self) -> None:
+        self.assertEqual(gate.runs_needing_approval(None), [])
+        self.assertEqual(gate.runs_needing_approval(["x", {"event": "pull_request"}]), [])
+
+    def test_has_pull_request_run(self) -> None:
+        self.assertTrue(gate.has_pull_request_run([{"event": "pull_request"}]))
+        self.assertFalse(gate.has_pull_request_run([{"event": "push"}]))
+        self.assertFalse(gate.has_pull_request_run(None))
+
+
 class DispatchRunTriggerTests(unittest.TestCase):
-    def _event(self, event: str, pulls: list[dict]) -> dict:
-        return {
-            "repository": {"full_name": "AllHailSeizure/sidereel"},
-            "workflow_run": {
-                "event": event,
-                "conclusion": "success",
-                "head_repository": {"full_name": "AllHailSeizure/sidereel"},
-                "head_sha": "newsha",
-                "pull_requests": pulls,
-            },
-        }
-
-    def test_dispatch_run_resolves_by_sha(self) -> None:
-        numbers, sha = gate.trigger_from_event("workflow_run", self._event("workflow_dispatch", []))
-        self.assertEqual(numbers, [])
-        self.assertEqual(sha, "newsha")
-
-    def test_push_run_still_ignored(self) -> None:
-        self.assertEqual(
-            gate.trigger_from_event("workflow_run", self._event("push", [])), ([], "")
-        )
+    def test_dispatch_and_push_runs_are_ignored(self) -> None:
+        for event in ("workflow_dispatch", "push"):
+            payload = {
+                "repository": {"full_name": "AllHailSeizure/sidereel"},
+                "workflow_run": {
+                    "event": event,
+                    "conclusion": "success",
+                    "head_repository": {"full_name": "AllHailSeizure/sidereel"},
+                    "head_sha": "newsha",
+                    "pull_requests": [],
+                },
+            }
+            self.assertEqual(gate.trigger_from_event("workflow_run", payload), ([], ""))
 
 
-class UpdateAndDispatchTests(unittest.TestCase):
-    """Drive update_and_dispatch with a fake gh. No network."""
+class UpdateAndApproveTests(unittest.TestCase):
+    """Drive update_and_approve with a fake gh. No network."""
 
     REPO = "AllHailSeizure/sidereel"
 
-    def _run_flow(self, *, dispatch_ok=True, workflow_text="on:\n  workflow_dispatch:\n",
-                  update_rc=0, update_err="", heads=("new",)):
+    def _run_flow(self, *, update_rc=0, update_err="", heads=("new",), runs=None, approve_ok=True):
         calls: list[list[str]] = []
         head_iter = iter(heads)
+        if runs is None:
+            runs = [{"id": 7, "event": "pull_request", "status": "completed", "conclusion": "action_required"}]
 
         def fake_run(cmd, env):
             calls.append(cmd)
             joined = " ".join(cmd)
             result = mock.Mock(returncode=0, stdout="", stderr="")
-            if "/contents/" in joined:
-                result.stdout = workflow_text
-            elif "update-branch" in joined:
+            if "update-branch" in joined:
                 result.returncode, result.stderr = update_rc, update_err
             elif cmd[:3] == ["gh", "pr", "view"]:
                 result.stdout = next(head_iter, heads[-1]) + "\n"
-            elif "dispatches" in joined:
-                result.returncode = 0 if dispatch_ok else 1
-            elif "comments" in joined:
-                result.stdout = ""
+            elif "actions/runs?head_sha" in joined:
+                import json as _json
+
+                result.stdout = _json.dumps(runs)
+            elif joined.endswith("/approve"):
+                result.returncode = 0 if approve_ok else 1
             return result
 
         with mock.patch.object(gate, "_run", fake_run), mock.patch.object(
             gate, "UPDATE_WAIT_SECONDS", 0.05
         ), mock.patch.object(gate, "UPDATE_POLL_SECONDS", 0.01):
-            outcome = gate.update_and_dispatch(90, "old", "feat/x", "master", self.REPO, {})
-        self.outcome = outcome
-        return outcome.ok, calls
+            outcome = gate.update_and_approve(90, "old", "master", self.REPO, {})
+        return outcome, calls
 
     @staticmethod
     def _has(calls, needle):
         return any(needle in " ".join(c) for c in calls)
 
-    def test_updates_then_dispatches(self) -> None:
-        ok, calls = self._run_flow()
-        self.assertTrue(ok)
-        self.assertEqual(self.outcome.updated_sha, "new")
-        self.assertTrue(self._has(calls, "update-branch"))
-        self.assertTrue(self._has(calls, "workflows/ci.yml/dispatches"))
+    def test_updates_then_releases_the_held_run(self) -> None:
+        outcome, calls = self._run_flow()
+        self.assertTrue(outcome.ok)
+        self.assertEqual(outcome.updated_sha, "new")
         names = [" ".join(c) for c in calls]
         self.assertLess(
             next(i for i, n in enumerate(names) if "update-branch" in n),
-            next(i for i, n in enumerate(names) if "dispatches" in n),
+            next(i for i, n in enumerate(names) if n.endswith("runs/7/approve")),
         )
 
-    def test_no_dispatch_trigger_means_no_update(self) -> None:
-        ok, calls = self._run_flow(workflow_text="on:\n  pull_request:\n")
-        self.assertTrue(ok)
-        self.assertFalse(self._has(calls, "update-branch"))
-        self.assertTrue(self._has(calls, "issues/90/comments") or self._has(calls, "pr comment"))
+    def test_nothing_held_means_nothing_approved(self) -> None:
+        runs = [{"id": 7, "event": "pull_request", "status": "in_progress", "conclusion": None}]
+        outcome, calls = self._run_flow(runs=runs)
+        self.assertTrue(outcome.ok)
+        self.assertEqual(outcome.updated_sha, "new")
+        self.assertFalse(self._has(calls, "/approve"))
 
-    def test_conflict_is_not_a_failure_and_not_dispatched(self) -> None:
-        ok, calls = self._run_flow(update_rc=1, update_err="merge conflict between base and head (HTTP 422)")
-        self.assertTrue(ok)
-        self.assertEqual(self.outcome.updated_sha, "")
-        self.assertFalse(self._has(calls, "dispatches"))
+    def test_conflict_is_not_a_failure_and_not_approved(self) -> None:
+        outcome, calls = self._run_flow(update_rc=1, update_err="merge conflict between base and head (HTTP 422)")
+        self.assertTrue(outcome.ok)
+        self.assertEqual(outcome.updated_sha, "")
+        self.assertFalse(self._has(calls, "/approve"))
 
     def test_stale_head_is_benign(self) -> None:
-        ok, calls = self._run_flow(update_rc=1, update_err="expected head sha didn't match current head ref. (HTTP 422)")
-        self.assertTrue(ok)
-        self.assertFalse(self._has(calls, "dispatches"))
+        outcome, calls = self._run_flow(update_rc=1, update_err="expected head sha didn't match current head ref. (HTTP 422)")
+        self.assertTrue(outcome.ok)
+        self.assertEqual(outcome.updated_sha, "")
 
     def test_head_that_never_moves_fails(self) -> None:
-        ok, calls = self._run_flow(heads=("old",))
-        self.assertFalse(ok)
-        self.assertFalse(self._has(calls, "dispatches"))
+        outcome, calls = self._run_flow(heads=("old",))
+        self.assertFalse(outcome.ok)
+        self.assertFalse(self._has(calls, "/approve"))
 
-    def test_dispatch_failure_fails_the_run(self) -> None:
-        ok, _ = self._run_flow(dispatch_ok=False)
-        self.assertFalse(ok)
+    def test_approve_failure_fails_the_run(self) -> None:
+        outcome, _ = self._run_flow(approve_ok=False)
+        self.assertFalse(outcome.ok)
 
 
 class ChecksFinishedTests(unittest.TestCase):
