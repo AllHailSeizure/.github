@@ -3,7 +3,8 @@
 # Repos without required checks must not opt in: this workflow will not merge
 # if it cannot see at least one required check. It never bypasses protection.
 # When the base branch needs up-to-date branches, a merge-ready PR that is behind
-# is updated and its CI dispatched (the caller must grant actions: write).
+# is updated and the CI run that update starts is approved (the caller must grant
+# actions: write), then the gate waits for the checks and merges.
 name: Automerge
 
 "on":
@@ -33,11 +34,6 @@ name: Automerge
         type: string
         required: false
         default: automerge
-      ci_workflow:
-        description: File name of the caller's CI workflow. After the gate updates a PR branch that is behind its base, it dispatches this workflow on the branch so the required checks rerun on the new head. It needs a workflow_dispatch trigger; without one the gate leaves a behind PR alone and says so on the PR.
-        type: string
-        required: false
-        default: ci.yml
       source_ref:
         description: Ref of AllHailSeizure/.github to check out (the same pin as uses:). github.workflow_sha is the caller commit and is not in this repo.
         type: string
@@ -85,5 +81,4 @@ jobs:
           AUTOMERGE_PULL_NUMBER: ${{ inputs.pull_number }}
           AUTOMERGE_HEAD_SHA: ${{ inputs.head_sha }}
           AUTOMERGE_EVENT_NAME: ${{ inputs.event_name }}
-          AUTOMERGE_CI_WORKFLOW: ${{ inputs.ci_workflow }}
         run: python tools/automerge_gate.py
