@@ -9,13 +9,15 @@ governance-separation check.
 
 When the base branch requires branches to be up to date and an otherwise
 merge-ready PR is behind it, the gate brings the branch up to date with the
-update-branch API and dispatches the repo's CI workflow on the branch. Pushes
-made by a workflow do not start pull_request runs, and a workflow_dispatch run
-does not start the caller's workflow_run trigger either, so the gate waits for
-that CI run itself and then merges. It never loosens a check: the required
-checks must be green on the new head. After a merge it updates the next
-labelled PR the merge left behind, one at a time, and carries it through the
-same way.
+update-branch API. GitHub starts the pull_request CI run for that push but holds
+it as action_required because the push came from a workflow, so the gate
+approves that run. (Starting CI with workflow_dispatch does not work: its check
+runs are not counted for the pull request, and it does not start the caller's
+workflow_run trigger.) The CI run's completion does not reliably start the
+gate again, so the gate waits for the checks on the new head itself and then
+merges. It never loosens a check: the required checks must be green on the new
+head. After a merge it updates the next labelled PR the merge left behind, one
+at a time, and carries it through the same way.
 
 The script is self-contained. It does not import hotel-kline-game Tools/.
 """
@@ -24,7 +26,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -38,13 +39,10 @@ from governance import AddonError, load_effective_config, list_pr_paths, mixes_g
 # (comma-separated). An empty list never merges.
 DEFAULT_REQUIRED_LABELS = "automerge"
 
-# CI runs the gate reacts to: ordinary PR runs, and the workflow_dispatch run the
-# gate itself starts after it updates a branch (such a run has no pull_requests).
-WORKFLOW_RUN_EVENTS = frozenset({"pull_request", "workflow_dispatch"})
+# CI runs the gate reacts to (the pull_request run of a PR).
+WORKFLOW_RUN_EVENTS = frozenset({"pull_request"})
 
-# Default CI workflow file to dispatch after update-branch (AUTOMERGE_CI_WORKFLOW).
-DEFAULT_CI_WORKFLOW = "ci.yml"
-# How long the gate waits for the dispatched CI run (AUTOMERGE_WAIT_MINUTES
+# How long the gate waits for CI on an updated head (AUTOMERGE_WAIT_MINUTES
 # overrides it), how often it looks, and how long one queue run may last.
 CI_WAIT_SECONDS = 40 * 60
 CI_POLL_SECONDS = 30
@@ -283,13 +281,28 @@ def is_conflict_error(text: str) -> bool:
     return "conflict" in lowered
 
 
-def workflow_has_dispatch(text: str) -> bool:
-    """True when a workflow file lists a workflow_dispatch trigger (ignoring comments)."""
-    for line in text.splitlines():
-        code = line.split("#", 1)[0]
-        if re.search(r"(^|[\s\[,'\"-])workflow_dispatch\b", code):
-            return True
-    return False
+def runs_needing_approval(runs: object) -> list[int]:
+    """Ids of pull_request runs held as action_required (list of run dicts)."""
+    if not isinstance(runs, list):
+        return []
+    ids: list[int] = []
+    for item in runs:
+        if not isinstance(item, dict):
+            continue
+        if item.get("event") != "pull_request":
+            continue
+        if str(item.get("conclusion") or item.get("status") or "") != "action_required":
+            continue
+        run_id = item.get("id")
+        if isinstance(run_id, int):
+            ids.append(run_id)
+    return ids
+
+
+def has_pull_request_run(runs: object) -> bool:
+    return isinstance(runs, list) and any(
+        isinstance(item, dict) and item.get("event") == "pull_request" for item in runs
+    )
 
 
 def notice_marker(kind: str, sha: str) -> str:
@@ -300,16 +313,8 @@ def notice_body(kind: str, sha: str, text: str) -> str:
     return f"{notice_marker(kind, sha)}\n{text}"
 
 
-def dispatch_command(repo: str, workflow: str, ref: str) -> list[str]:
-    return [
-        "gh",
-        "api",
-        "-X",
-        "POST",
-        f"repos/{repo}/actions/workflows/{_quote(workflow)}/dispatches",
-        "-f",
-        f"ref={ref}",
-    ]
+def approve_command(repo: str, run_id: int) -> list[str]:
+    return ["gh", "api", "-X", "POST", f"repos/{repo}/actions/runs/{run_id}/approve"]
 
 
 def update_branch_command(repo: str, number: int, sha: str) -> list[str]:
@@ -669,22 +674,24 @@ def _strict_required(repo: str, branch: str, env: dict[str, str]) -> bool:
     return strict_from_protection(protection)
 
 
-def _ci_supports_dispatch(
-    repo: str, workflow: str, base_branch: str, env: dict[str, str]
-) -> bool:
+def _runs_for_head(repo: str, sha: str, env: dict[str, str]) -> list[dict]:
     result = _run(
         [
             "gh",
             "api",
-            "-H",
-            "Accept: application/vnd.github.raw",
-            f"repos/{repo}/contents/.github/workflows/{_quote(workflow)}?ref={_quote(base_branch)}",
+            f"repos/{repo}/actions/runs?head_sha={sha}&per_page=100",
+            "--jq",
+            "[.workflow_runs[]|{id,event,status,conclusion}]",
         ],
         env,
     )
     if result.returncode != 0:
-        return False
-    return workflow_has_dispatch(result.stdout)
+        return []
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return []
+    return payload if isinstance(payload, list) else []
 
 
 def _has_notice(number: int, marker: str, repo: str, env: dict[str, str]) -> bool:
@@ -738,42 +745,24 @@ class Outcome(NamedTuple):
     """Result of handling one PR. ok False fails the run."""
 
     ok: bool
-    updated_sha: str = ""  # head after the gate updated the branch and dispatched CI
+    updated_sha: str = ""  # head after the gate updated the branch (CI released)
     merged: bool = False
 
 
-def update_and_dispatch(
+def update_and_approve(
     number: int,
     sha: str,
-    head_ref: str,
     base_branch: str,
     repo: str,
     env: dict[str, str],
 ) -> Outcome:
-    """Merge the base branch into the PR branch, then dispatch CI on the branch.
+    """Merge the base branch into the PR branch and release the CI run it starts.
 
     Returns ok False only when the PR is left stuck by a failure the gate caused
-    (the update landed but CI could not be started). Conflicts and refused
-    updates are reported on the PR and are not failures. updated_sha is set
-    when CI was dispatched on the new head.
+    (the update landed but the CI run could not be released). Conflicts and
+    refused updates are reported on the PR and are not failures. updated_sha is
+    set when the branch was updated and CI is running on the new head.
     """
-    workflow = env.get("AUTOMERGE_CI_WORKFLOW") or DEFAULT_CI_WORKFLOW
-    if not _ci_supports_dispatch(repo, workflow, base_branch, env):
-        print(
-            f"#{number}: behind {base_branch}, but {workflow} has no workflow_dispatch "
-            "trigger, so CI cannot be restarted after an update; not updating"
-        )
-        _post_notice(
-            number,
-            "no-dispatch",
-            sha,
-            f"This branch is behind `{base_branch}` and the base branch needs it up to date, "
-            f"but `{workflow}` has no `workflow_dispatch` trigger, so automerge cannot restart "
-            "CI after updating it. Update the branch by hand.",
-            repo,
-            env,
-        )
-        return Outcome(True)
     result = _run(update_branch_command(repo, number, sha), env)
     if result.returncode != 0:
         text = result.stderr or result.stdout
@@ -808,21 +797,33 @@ def update_and_dispatch(
     if new_sha == sha:
         print(f"#{number}: update requested but the head did not move", file=sys.stderr)
         return Outcome(False)
-    dispatch = _run(dispatch_command(repo, workflow, head_ref), env)
-    if dispatch.returncode != 0:
-        print(dispatch.stderr or dispatch.stdout, file=sys.stderr)
-        _post_notice(
-            number,
-            "dispatch-failed",
-            new_sha,
-            f"Automerge updated this branch but could not start `{workflow}` on it. "
-            "Re-run CI by hand.",
-            repo,
-            env,
-        )
-        return Outcome(False)
+    runs: list[dict] = []
+    deadline = time.monotonic() + UPDATE_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        runs = _runs_for_head(repo, new_sha, env)
+        if has_pull_request_run(runs):
+            break
+        time.sleep(UPDATE_POLL_SECONDS)
+    approved = 0
+    for run_id in runs_needing_approval(runs):
+        released = _run(approve_command(repo, run_id), env)
+        if released.returncode != 0:
+            print(released.stderr or released.stdout, file=sys.stderr)
+            _post_notice(
+                number,
+                "approve-failed",
+                new_sha,
+                "Automerge updated this branch but could not release the CI run it started "
+                "(it is waiting for approval). Approve it in the Actions tab.",
+                repo,
+                env,
+            )
+            return Outcome(False)
+        approved += 1
+    if not has_pull_request_run(runs):
+        print(f"#{number}: no pull_request CI run appeared on {new_sha[:7]}", file=sys.stderr)
     print(
-        f"#{number}: updated {sha[:7]} -> {new_sha[:7]} and dispatched {workflow} on {head_ref}"
+        f"#{number}: updated {sha[:7]} -> {new_sha[:7]}; released {approved} held CI run(s)"
     )
     return Outcome(True, updated_sha=new_sha)
 
@@ -932,9 +933,8 @@ def consider(number: int, env: dict[str, str], *, allow_merge: bool = True) -> O
                 env,
             )
         return Outcome(True)
-    head_ref = str(pull.get("headRefName") or "")
     if _behind_and_must_update(pull, sha, branch, repo, env):
-        return update_and_dispatch(number, sha, head_ref, branch, repo, env)
+        return update_and_approve(number, sha, branch, repo, env)
     if not allow_merge:
         print(f"#{number}: not behind {branch}; left for its own run")
         return Outcome(True)
@@ -943,7 +943,7 @@ def consider(number: int, env: dict[str, str], *, allow_merge: bool = True) -> O
     if not merged:
         if is_not_up_to_date_error(error):
             print(f"#{number}: base moved before the merge; updating instead")
-            return update_and_dispatch(number, sha, head_ref, branch, repo, env)
+            return update_and_approve(number, sha, branch, repo, env)
         return Outcome(False)
     ok = close_linked_issues(number, pull.get("closingIssuesReferences"), repo, env)
     return Outcome(ok, merged=True)
@@ -1026,7 +1026,7 @@ def checks_finished(
 
 
 def wait_for_ci(number: int, sha: str, deadline: float, env: dict[str, str]) -> bool:
-    """Wait for the dispatched CI run on sha to finish. False on timeout.
+    """Wait for CI on sha to finish. False on timeout.
 
     Returns early when the PR head moves or the PR closes; the caller looks at
     the PR again either way.
