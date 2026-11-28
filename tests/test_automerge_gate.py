@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -335,6 +336,193 @@ class LinkedIssueTests(unittest.TestCase):
         self.assertNotIn("--subject", cmd)
         self.assertNotIn("--body", cmd)
         self.assertNotIn("--admin", cmd)
+
+class StrictDetectionTests(unittest.TestCase):
+    def test_rules_strict_true(self) -> None:
+        rules = [
+            {"type": "deletion"},
+            {
+                "type": "required_status_checks",
+                "parameters": {"strict_required_status_checks_policy": True},
+            },
+        ]
+        self.assertTrue(gate.strict_from_rules(rules))
+
+    def test_rules_strict_false(self) -> None:
+        rules = [
+            {
+                "type": "required_status_checks",
+                "parameters": {"strict_required_status_checks_policy": False},
+            }
+        ]
+        self.assertFalse(gate.strict_from_rules(rules))
+
+    def test_rules_missing_or_garbage(self) -> None:
+        self.assertFalse(gate.strict_from_rules(None))
+        self.assertFalse(gate.strict_from_rules([{"type": "deletion"}, "x"]))
+
+    def test_protection_strict(self) -> None:
+        self.assertTrue(gate.strict_from_protection({"strict": True, "contexts": []}))
+        self.assertFalse(gate.strict_from_protection({"strict": False}))
+        self.assertFalse(gate.strict_from_protection(None))
+
+
+class NeedsUpdateTests(unittest.TestCase):
+    def test_not_behind_never_updates(self) -> None:
+        self.assertFalse(gate.needs_update(behind_by=0, merge_state="BEHIND", strict=True))
+
+    def test_behind_state_updates(self) -> None:
+        self.assertTrue(gate.needs_update(behind_by=2, merge_state="BEHIND", strict=False))
+
+    def test_behind_with_strict_updates_when_state_lags(self) -> None:
+        self.assertTrue(gate.needs_update(behind_by=1, merge_state="UNKNOWN", strict=True))
+
+    def test_behind_without_strict_merges_as_is(self) -> None:
+        self.assertFalse(gate.needs_update(behind_by=3, merge_state="CLEAN", strict=False))
+
+
+class ErrorClassifierTests(unittest.TestCase):
+    def test_not_up_to_date(self) -> None:
+        text = "Pull request #90 is not mergeable: the head branch is not up to date with the base branch."
+        self.assertTrue(gate.is_not_up_to_date_error(text))
+        self.assertFalse(gate.is_not_up_to_date_error("Required status check is expected"))
+
+    def test_conflict(self) -> None:
+        self.assertTrue(gate.is_conflict_error("merge conflict between base and head (HTTP 422)"))
+        self.assertFalse(gate.is_conflict_error("Resource not accessible by integration"))
+
+    def test_stale_head(self) -> None:
+        self.assertTrue(gate.is_stale_head_error("expected head sha didn't match current head ref."))
+        self.assertFalse(gate.is_stale_head_error("merge conflict"))
+
+
+class WorkflowDispatchDetectionTests(unittest.TestCase):
+    def test_mapping_form(self) -> None:
+        self.assertTrue(gate.workflow_has_dispatch("on:\n  pull_request:\n  workflow_dispatch:\n"))
+
+    def test_list_and_inline_forms(self) -> None:
+        self.assertTrue(gate.workflow_has_dispatch("on: [push, workflow_dispatch]\n"))
+        self.assertTrue(gate.workflow_has_dispatch("on:\n  - workflow_dispatch\n"))
+
+    def test_comment_and_absent(self) -> None:
+        self.assertFalse(gate.workflow_has_dispatch("on:\n  push:\n# workflow_dispatch:\n"))
+        self.assertFalse(gate.workflow_has_dispatch("on:\n  pull_request:\n"))
+
+
+class CommandTests(unittest.TestCase):
+    def test_update_branch_is_merge_method_pinned_to_head(self) -> None:
+        cmd = gate.update_branch_command("AllHailSeizure/sidereel", 90, "abc")
+        self.assertEqual(cmd[:4], ["gh", "api", "-X", "PUT"])
+        self.assertIn("repos/AllHailSeizure/sidereel/pulls/90/update-branch", cmd)
+        self.assertIn("expected_head_sha=abc", cmd)
+        self.assertFalse([part for part in cmd if "rebase" in part])
+
+    def test_dispatch_targets_workflow_and_branch(self) -> None:
+        cmd = gate.dispatch_command("AllHailSeizure/sidereel", "ci.yml", "feat/x")
+        self.assertIn("repos/AllHailSeizure/sidereel/actions/workflows/ci.yml/dispatches", cmd)
+        self.assertIn("ref=feat/x", cmd)
+
+    def test_notice_marker_is_per_kind_and_sha(self) -> None:
+        self.assertNotEqual(gate.notice_marker("conflict", "a"), gate.notice_marker("conflict", "b"))
+        self.assertIn(gate.notice_marker("conflict", "a"), gate.notice_body("conflict", "a", "text"))
+
+
+class DispatchRunTriggerTests(unittest.TestCase):
+    def _event(self, event: str, pulls: list[dict]) -> dict:
+        return {
+            "repository": {"full_name": "AllHailSeizure/sidereel"},
+            "workflow_run": {
+                "event": event,
+                "conclusion": "success",
+                "head_repository": {"full_name": "AllHailSeizure/sidereel"},
+                "head_sha": "newsha",
+                "pull_requests": pulls,
+            },
+        }
+
+    def test_dispatch_run_resolves_by_sha(self) -> None:
+        numbers, sha = gate.trigger_from_event("workflow_run", self._event("workflow_dispatch", []))
+        self.assertEqual(numbers, [])
+        self.assertEqual(sha, "newsha")
+
+    def test_push_run_still_ignored(self) -> None:
+        self.assertEqual(
+            gate.trigger_from_event("workflow_run", self._event("push", [])), ([], "")
+        )
+
+
+class UpdateAndDispatchTests(unittest.TestCase):
+    """Drive update_and_dispatch with a fake gh. No network."""
+
+    REPO = "AllHailSeizure/sidereel"
+
+    def _run_flow(self, *, dispatch_ok=True, workflow_text="on:\n  workflow_dispatch:\n",
+                  update_rc=0, update_err="", heads=("new",)):
+        calls: list[list[str]] = []
+        head_iter = iter(heads)
+
+        def fake_run(cmd, env):
+            calls.append(cmd)
+            joined = " ".join(cmd)
+            result = mock.Mock(returncode=0, stdout="", stderr="")
+            if "/contents/" in joined:
+                result.stdout = workflow_text
+            elif "update-branch" in joined:
+                result.returncode, result.stderr = update_rc, update_err
+            elif cmd[:3] == ["gh", "pr", "view"]:
+                result.stdout = next(head_iter, heads[-1]) + "\n"
+            elif "dispatches" in joined:
+                result.returncode = 0 if dispatch_ok else 1
+            elif "comments" in joined:
+                result.stdout = ""
+            return result
+
+        with mock.patch.object(gate, "_run", fake_run), mock.patch.object(
+            gate, "UPDATE_WAIT_SECONDS", 0.05
+        ), mock.patch.object(gate, "UPDATE_POLL_SECONDS", 0.01):
+            ok = gate.update_and_dispatch(90, "old", "feat/x", "master", self.REPO, {})
+        return ok, calls
+
+    @staticmethod
+    def _has(calls, needle):
+        return any(needle in " ".join(c) for c in calls)
+
+    def test_updates_then_dispatches(self) -> None:
+        ok, calls = self._run_flow()
+        self.assertTrue(ok)
+        self.assertTrue(self._has(calls, "update-branch"))
+        self.assertTrue(self._has(calls, "workflows/ci.yml/dispatches"))
+        names = [" ".join(c) for c in calls]
+        self.assertLess(
+            next(i for i, n in enumerate(names) if "update-branch" in n),
+            next(i for i, n in enumerate(names) if "dispatches" in n),
+        )
+
+    def test_no_dispatch_trigger_means_no_update(self) -> None:
+        ok, calls = self._run_flow(workflow_text="on:\n  pull_request:\n")
+        self.assertTrue(ok)
+        self.assertFalse(self._has(calls, "update-branch"))
+        self.assertTrue(self._has(calls, "issues/90/comments") or self._has(calls, "pr comment"))
+
+    def test_conflict_is_not_a_failure_and_not_dispatched(self) -> None:
+        ok, calls = self._run_flow(update_rc=1, update_err="merge conflict between base and head (HTTP 422)")
+        self.assertTrue(ok)
+        self.assertFalse(self._has(calls, "dispatches"))
+
+    def test_stale_head_is_benign(self) -> None:
+        ok, calls = self._run_flow(update_rc=1, update_err="expected head sha didn't match current head ref. (HTTP 422)")
+        self.assertTrue(ok)
+        self.assertFalse(self._has(calls, "dispatches"))
+
+    def test_head_that_never_moves_fails(self) -> None:
+        ok, calls = self._run_flow(heads=("old",))
+        self.assertFalse(ok)
+        self.assertFalse(self._has(calls, "dispatches"))
+
+    def test_dispatch_failure_fails_the_run(self) -> None:
+        ok, _ = self._run_flow(dispatch_ok=False)
+        self.assertFalse(ok)
+
 
 if __name__ == "__main__":
     unittest.main()
